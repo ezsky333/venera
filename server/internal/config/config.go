@@ -48,7 +48,25 @@ type Config struct {
 
 	// MaxLibraryBytes 是库大小上限（0 表示不限制）。
 	MaxLibraryBytes int64
+
+	// Proxy 是访问漫画源站点时使用的出口代理。
+	//
+	// 支持的形式：
+	//   ""                        → 不使用代理（默认）
+	//   "env"                     → 读取 HTTP_PROXY/HTTPS_PROXY/NO_PROXY 环境变量
+	//   "http://host:port"        → HTTP 代理
+	//   "socks5://host:port"      → SOCKS5 代理
+	//
+	// 注意：NAS 自己的 HTTP API（客户端访问）永远直连，不受此配置影响。
+	Proxy string
+
+	// ProxyBypass 是需要绕过代理的目标列表，逗号分隔。
+	// 默认已包含局域网网段，避免把 NAS 自身流量送进代理。
+	ProxyBypass string
 }
+
+// DefaultProxyBypass 是默认的代理绕过列表（局域网 + 回环）。
+const DefaultProxyBypass = "localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,*.local"
 
 func Default() Config {
 	return Config{
@@ -61,6 +79,8 @@ func Default() Config {
 		GlobalRPS:             3,
 		SyncRetention:         90 * 24 * time.Hour,
 		AutoDownloadFavorites: true,
+		Proxy:                 "",
+		ProxyBypass:           DefaultProxyBypass,
 	}
 }
 
@@ -143,6 +163,12 @@ func applyEnv(c *Config) {
 	}
 	if v, err := strconv.ParseInt(os.Getenv("VENERA_MAX_LIBRARY_BYTES"), 10, 64); err == nil && v > 0 {
 		c.MaxLibraryBytes = v
+	}
+	if v := os.Getenv("VENERA_PROXY"); v != "" {
+		c.Proxy = v
+	}
+	if v := os.Getenv("VENERA_PROXY_BYPASS"); v != "" {
+		c.ProxyBypass = v
 	}
 }
 

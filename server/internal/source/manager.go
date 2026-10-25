@@ -33,6 +33,8 @@ type Options struct {
 	Timeout  time.Duration
 	Platform string
 	Locale   string
+	// Proxy 是访问源站点的出口代理（NAS 自身 API 不受影响）
+	Proxy jshost.ProxyConfig
 }
 
 // Manager 负责源的安装、索引与执行。
@@ -294,7 +296,7 @@ func (m *Manager) withHost(key string, fn func(h *jshost.Host) error) error {
 		Timeout:    m.opts.Timeout,
 		Platform:   m.opts.Platform,
 		Locale:     m.opts.Locale,
-		HTTPClient: nil,
+		HTTPClient: jshost.DefaultClientWithProxy(m.opts.Proxy),
 		Limiter:    m.limiter,
 	}
 

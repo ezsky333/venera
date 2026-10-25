@@ -1,13 +1,6 @@
 # ---- build stage ----
 # 使用多阶段构建把二进制压到最小，适合 NAS 上长期运行。
-#
-# 注意 Go 版本：go.mod 里的依赖（modernc.org/sqlite）要求较新的工具链。
-# 镜像版本必须 >= go.mod 的 `go` 指令，否则会出现
-#   "go.mod requires go >= 1.26.1 (running go 1.24; GOTOOLCHAIN=local)"
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
-
-# 允许按 go.mod 自动拉取工具链（防止镜像小版本落后于 go.mod）
-ENV GOTOOLCHAIN=auto
+FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
 
 WORKDIR /src
 

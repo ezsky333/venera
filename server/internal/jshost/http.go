@@ -3,10 +3,8 @@ package jshost
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -30,23 +28,16 @@ type RateLimiter interface {
 
 // DefaultClient 返回一个与 App 行为接近的 HTTP 客户端：
 // 不自动跟随重定向以外的特殊处理，关闭 HTTP/2（部分站点指纹敏感）。
+//
+// 代理行为由 Proxy 配置控制；默认直连。
 func DefaultClient() *http.Client {
-	tr := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
-		DialContext: (&net.Dialer{
-			Timeout:   20 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-		MaxIdleConns:          128,
-		MaxIdleConnsPerHost:   8,
-		IdleConnTimeout:       60 * time.Second,
-		TLSHandshakeTimeout:   20 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-		ForceAttemptHTTP2:     false,
-		TLSClientConfig:       &tls.Config{InsecureSkipVerify: false},
-	}
+	return DefaultClientWithProxy(ProxyConfig{})
+}
+
+// DefaultClientWithProxy 按代理配置构造客户端。
+func DefaultClientWithProxy(pc ProxyConfig) *http.Client {
 	return &http.Client{
-		Transport: tr,
+		Transport: pc.transport(),
 		Timeout:   90 * time.Second,
 	}
 }

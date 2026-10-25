@@ -1,6 +1,8 @@
 import 'dart:async';
-import 'dart:io' show Platform;
+import 'dart:io' show HttpClient, Platform;
 
+import 'package:dio/dio.dart';
+import 'package:dio/io.dart';
 import 'package:flutter/foundation.dart';
 
 import 'package:venera/foundation/comic_source/comic_source.dart';
@@ -9,17 +11,7 @@ import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/history.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/nas_client.dart';
-import 'package:venera/network/app_dio.dart';
 
-/// W2 同步引擎（App 侧）。
-///
-/// 与原有 `DataSync`（WebDAV 整包覆盖）的区别：
-///   - **操作日志**：只上传"我做了什么"（新增/删除收藏、进度更新），不传整包；
-///   - **游标增量**：记录服务端 op id，重连只拉之后的操作；
-///   - **语义合并**：收藏是集合、历史是 LWW，天然支持多设备；
-///   - **双向**：服务端也会把其他设备的改动推给本机。
-///
-/// 设计上刻意做成"旁路"：原 DataSync 完全不动，用户可任选其一或都不用。
 class NasSync with ChangeNotifier {
   static NasSync? _instance;
 
@@ -173,16 +165,11 @@ class NasSync with ChangeNotifier {
     _pendingOps.clear();
 
     try {
-      var dio = AppDio(BaseOptions(
-        baseUrl: client.config.baseUrl,
-        headers: {
-          if (client.config.token.isNotEmpty)
-            'Authorization': 'Bearer ${client.config.token}',
-          'X-Client-Id': client.config.clientId,
-          'Content-Type': 'application/json',
-        },
-        validateStatus: (s) => s != null,
-      ));
+      var dio = _dio(client);
+      if (dio == null) {
+        _pendingOps.insertAll(0, batch);
+        return;
+      }
       var res = await dio.post('/api/v1/sync/push', data: {
         'clientId': client.config.clientId,
         'deviceName': _deviceName(),
@@ -257,7 +244,11 @@ class NasSync with ChangeNotifier {
       await flush();
 
       if (full) {
-        // 首次连接/游标丢失：拉快照重建本地状态
+        // 首次连接 / 游标丢失：
+        //   1. 先把本地已有的收藏与历史**全量上推**（否则服务端永远是空的，
+        //      因为它只见到"变更"，而用户的历史数据在连 NAS 之前就存在了）
+        //   2. 再拉快照，接收其他设备的既有数据
+        await _bootstrapPush();
         await _pullSnapshot();
       } else {
         await _pullIncremental();
@@ -269,6 +260,97 @@ class NasSync with ChangeNotifier {
     } finally {
       _isSyncing = false;
       notifyListeners();
+    }
+  }
+
+  /// 首次连接时把本地既有数据全量上推到服务端。
+  ///
+  /// 为什么需要这一步：增量同步只跟踪"连接之后的变更"。用户的历史收藏、
+  /// 阅读进度早在连接 NAS 之前就已存在，服务端永远看不到它们，
+  /// 结果就是"连上了但服务端是空的、也不会去下载收藏"。
+  ///
+  /// 分批推送（每批 200 条）避免单个请求过大；服务端侧对重复 op 幂等，
+  /// 因此重复执行安全。
+  Future<void> _bootstrapPush() async {
+    final client = NasClient.instance;
+    var dio = _dio(client);
+    if (dio == null) return;
+
+    final ops = <Map<String, dynamic>>[];
+
+    // ---- 收藏 ----
+    try {
+      final folders = LocalFavoritesManager().folderNames;
+      for (final folder in folders) {
+        final comics = LocalFavoritesManager().getFolderComics(folder);
+        for (final item in comics) {
+          ops.add({
+            'type': 'fav.add',
+            'payload': {
+              'folder': folder,
+              'source': item.sourceKey,
+              'comicId': item.id,
+              'title': item.name,
+              'author': item.author,
+              'cover': item.coverPath,
+              'tags': item.tags,
+              'sourceType': item.type.value,
+            },
+          });
+        }
+      }
+    } catch (e) {
+      Log.error('NAS Sync', 'bootstrap: read favorites failed: $e');
+    }
+
+    // ---- 阅读历史 ----
+    try {
+      final histories = HistoryManager().getAll();
+      for (final h in histories) {
+        ops.add({
+          'type': 'history.update',
+          'payload': {
+            'source': h.type.sourceKey,
+            'comicId': h.id,
+            'title': h.title,
+            'cover': h.cover,
+            'sourceType': h.type.value,
+            'ep': h.ep,
+            'page': h.page,
+            'group': h.group ?? 0,
+            'readEpisodes': h.readEpisode.toList(),
+            'maxPage': h.maxPage,
+            'at': h.time.millisecondsSinceEpoch,
+          },
+        });
+      }
+    } catch (e) {
+      Log.error('NAS Sync', 'bootstrap: read history failed: $e');
+    }
+
+    if (ops.isEmpty) return;
+    Log.info('NAS Sync', 'bootstrap: pushing ${ops.length} existing records');
+
+    const batchSize = 200;
+    for (var i = 0; i < ops.length; i += batchSize) {
+      final batch = ops.sublist(i, (i + batchSize).clamp(0, ops.length));
+      try {
+        var res = await dio.post('/api/v1/sync/push', data: {
+          'clientId': client.config.clientId,
+          'deviceName': _deviceName(),
+          'lamport': DateTime.now().millisecondsSinceEpoch,
+          'ops': batch,
+        });
+        if (res.statusCode == 200 && res.data is Map) {
+          var cursor = (res.data['cursor'] as num?)?.toInt();
+          if (cursor != null) await client.updateCursor(cursor);
+        } else {
+          Log.error('NAS Sync', 'bootstrap push failed: ${res.statusCode}');
+        }
+      } catch (e) {
+        Log.error('NAS Sync', 'bootstrap push error: $e');
+        return;
+      }
     }
   }
 
@@ -334,8 +416,12 @@ class NasSync with ChangeNotifier {
 
   Dio? _dio(NasClient client) {
     if (!client.isEnabled) return null;
-    return AppDio(BaseOptions(
+    // 与 NasClient 保持一致：用纯 Dart HTTP，不用 RHttpAdapter
+    // （后者依赖 flutter_rust_bridge，未初始化时所有请求都会抛异常）
+    final dio = Dio(BaseOptions(
       baseUrl: client.config.baseUrl,
+      connectTimeout: const Duration(seconds: 5),
+      receiveTimeout: const Duration(seconds: 30),
       headers: {
         if (client.config.token.isNotEmpty)
           'Authorization': 'Bearer ${client.config.token}',
@@ -343,6 +429,13 @@ class NasSync with ChangeNotifier {
       },
       validateStatus: (s) => s != null,
     ));
+    dio.httpClientAdapter = IOHttpClientAdapter(
+      createHttpClient: () => HttpClient()
+        ..connectionTimeout = const Duration(seconds: 5)
+        // 局域网 NAS 必须直连，不能走用户配置的代理
+        ..findProxy = ((uri) => 'DIRECT'),
+    );
+    return dio;
   }
 
   /// 把远端操作应用到本地状态。

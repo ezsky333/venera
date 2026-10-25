@@ -1,8 +1,18 @@
-﻿import 'dart:async';
+// 注意：这里刻意使用标准 Dio + 纯 Dart 的 IOHttpClientAdapter，
+// 而不是项目里的 AppDio。
+//
+// 原因：AppDio 在构造时硬编码 `httpClientAdapter = RHttpAdapter()`，
+// 依赖 flutter_rust_bridge（Rust 实现）。若 Rust 侧未初始化完成
+// （例如冷启动早期、或某些 ABI 上初始化失败），所有请求都会抛
+//   Bad state: flutter_rust_bridge has not been initialized
+// NAS 是纯 HTTP/JSON，用系统 HTTP 栈更可靠，也避免和 Rust 生命周期耦合。
+import 'dart:io' show HttpClient;
+
+import 'package:dio/dio.dart';
+import 'package:dio/io.dart';
 
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/log.dart';
-import 'package:venera/network/app_dio.dart';
 
 /// NAS 服务端配置。
 class NasConfig {
@@ -173,7 +183,7 @@ class NasClient {
       _dio = null;
       return;
     }
-    _dio = AppDio(BaseOptions(
+    final dio = Dio(BaseOptions(
       baseUrl: _config.baseUrl,
       connectTimeout: const Duration(seconds: 5),
       receiveTimeout: const Duration(seconds: 20),
@@ -184,6 +194,23 @@ class NasClient {
       // 让调用方自行判断状态码，避免每次非 2xx 都抛异常
       validateStatus: (s) => s != null,
     ));
+    // 纯 Dart HTTP 实现，不依赖 flutter_rust_bridge
+    //
+    // 关键：NAS 是局域网服务，必须**绕过**用户配置的代理。
+    // App 的「设置 → 网络 → 代理 → manual」针对的是访问漫画源站点的流量；
+    // 若 NAS 请求也走代理，局域网地址（如 192.168.x.x）会被代理吞掉或超时。
+    // 因此这里显式设置 findProxy 为 DIRECT。
+    dio.httpClientAdapter = IOHttpClientAdapter(
+      createHttpClient: () {
+        final client = HttpClient()
+          ..connectionTimeout = const Duration(seconds: 5)
+          // 强制直连，忽略系统/环境代理
+          ..findProxy = ((uri) => 'DIRECT')
+          ..badCertificateCallback = (cert, host, port) => false;
+        return client;
+      },
+    );
+    _dio = dio;
   }
 
   /// 探测服务是否可达。

@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/venera-app/venera-nas/assets"
+	"github.com/venera-app/venera-nas/internal/jshost"
 	"github.com/venera-app/venera-nas/internal/api"
 	"github.com/venera-app/venera-nas/internal/config"
 	"github.com/venera-app/venera-nas/internal/jobs"
@@ -89,6 +90,7 @@ func run(cfg config.Config, logger *slog.Logger, doImport bool, archive string) 
 		Timeout:  150 * time.Second,
 		Platform: "linux",
 		Locale:   "zh_CN",
+		Proxy:    jshost.ProxyConfig{Raw: cfg.Proxy, Bypass: cfg.ProxyBypass},
 	})
 	if err != nil {
 		return fmt.Errorf("source manager: %w", err)
@@ -104,7 +106,7 @@ func run(cfg config.Config, logger *slog.Logger, doImport bool, archive string) 
 		logger.Info("download", "msg", fmt.Sprintf(format, args...))
 	})
 	dl.SetFetch(func(url string, headers map[string]string) ([]byte, error) {
-		return fetchImage(url, headers)
+		return jshost.FetchImageWithProxy(jshost.DefaultClientWithProxy(jshost.ProxyConfig{Raw: cfg.Proxy, Bypass: cfg.ProxyBypass}), url, headers)
 	})
 	dl.SetTransform(func(initJS string, cfg *jobs.ImageConfig, data []byte) ([]byte, error) {
 		if initJS == "" {

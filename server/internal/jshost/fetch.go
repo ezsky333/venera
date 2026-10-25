@@ -18,6 +18,15 @@ func FetchImage(client HTTPDoer, rawURL string, headers map[string]string) ([]by
 	if client == nil {
 		client = DefaultClient()
 	}
+	return fetchImageWith(client, rawURL, headers)
+}
+
+// FetchImageWithProxy 按代理配置下载图片。
+func FetchImageWithProxy(client HTTPDoer, rawURL string, headers map[string]string) ([]byte, error) {
+	return FetchImage(client, rawURL, headers)
+}
+
+func fetchImageWith(client HTTPDoer, rawURL string, headers map[string]string) ([]byte, error) {
 	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, err
