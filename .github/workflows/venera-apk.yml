@@ -77,23 +77,51 @@ jobs:
           echo "ANDROID_HOME=$ANDROID_HOME"
           ls -1 "$ANDROID_HOME/ndk" 2>/dev/null || echo "no ndk preinstalled"
 
-      # build.gradle 里写死了 ndkVersion "28.0.13004108"，
-      # 缺这个精确版本 Gradle 会报 "NDK not configured"。
-      # 镜像通常已带；没有则按需安装（不碰已下线的 "tools" 包）。
-      - name: Ensure NDK 28.0.13004108
+      # build.gradle 里写死了 ndkVersion "28.0.13004108"。
+      # runner 预装的是 27.3 / 29.0 / 30.0，如果缺这个精确版本，
+      # Gradle 会报 "NDK not configured"。
+      #
+      # 策略：
+      #   1. 已存在 → 直接用
+      #   2. 否则用 sdkmanager 装（注意 sdkmanager 在 cmdline-tools/<ver>/bin/ 下，深度 3）
+      #   3. 装不上 → 退而求其次，把 build.gradle 的 ndkVersion 改成已装的最新版
+      #      （本项目并未直接用 NDK 编译 C/C++，版本仅被插件读取）
+      - name: Ensure NDK
         run: |
+          set -e
           SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
           TARGET="28.0.13004108"
+
           if [ -d "$SDK/ndk/$TARGET" ]; then
             echo "NDK $TARGET already present"
             exit 0
           fi
-          echo "Installing NDK $TARGET ..."
-          SM="$(find "$SDK/cmdline-tools" -maxdepth 2 -name sdkmanager -type f | sort | tail -1)"
-          echo "using sdkmanager: $SM"
-          yes | "$SM" --licenses >/dev/null 2>&1 || true
-          "$SM" --install "ndk;$TARGET"
-          ls -1 "$SDK/ndk"
+
+          echo "--- installed NDKs ---"
+          ls -1 "$SDK/ndk" 2>/dev/null || echo "(none)"
+
+          SM="$(find "$SDK" -maxdepth 5 -name sdkmanager -type f 2>/dev/null | sort | tail -1)"
+          echo "sdkmanager: ${SM:-<not found>}"
+
+          if [ -n "$SM" ]; then
+            yes | "$SM" --licenses >/dev/null 2>&1 || true
+            if "$SM" --install "ndk;$TARGET"; then
+              echo "NDK $TARGET installed"
+              ls -1 "$SDK/ndk"
+              exit 0
+            fi
+            echo "::warning::sdkmanager could not install NDK $TARGET; falling back"
+          fi
+
+          # 回退：使用已安装的最新 NDK，改写 build.gradle
+          LATEST="$(ls -1 "$SDK/ndk" 2>/dev/null | sort -V | tail -1)"
+          if [ -z "$LATEST" ]; then
+            echo "::error::no NDK available at all"
+            exit 1
+          fi
+          echo "::warning::using installed NDK $LATEST instead of $TARGET"
+          sed -i "s/ndkVersion \"[^\"]*\"/ndkVersion \"$LATEST\"/" android/app/build.gradle
+          grep -n "ndkVersion" android/app/build.gradle
 
       - run: flutter pub get
 
