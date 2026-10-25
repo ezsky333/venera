@@ -39,9 +39,17 @@ extension _FutureInit<T> on Future<T> {
 Future<void> init() async {
   await App.init().wait();
   await SingleInstanceCookieJar.createInstance();
+  // Rust 库 (rhttp) 必须最先初始化完成，否则后续任何使用 AppDio 的
+  // 请求都会抛 "flutter_rust_bridge has not been initialized"。
+  // 这里单独 await 并显式记录失败原因，避免被下面的 Future.wait 吞掉。
+  try {
+    await Rhttp.init();
+  } catch (e, s) {
+    Log.error("Rhttp", "RustLib.init failed: $e\n$s");
+    debugPrint("Rhttp init failed: $e\n$s");
+  }
   try {
     var futures = [
-      Rhttp.init(),
       App.initComponents(),
       SAFTaskWorker().init().wait(),
       AppTranslation.init().wait(),

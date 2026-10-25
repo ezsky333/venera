@@ -174,6 +174,24 @@ jobs:
           echo "=== artifacts ==="
           ls -lh dist
 
+      # cargokit 编译 Rust 失败时只往 stderr 打日志，不会让 Gradle 失败，
+      # 于是会出现 "BUILD SUCCESSFUL" 但 APK 里没有 librhttp.so 的情况，
+      # 装到手机上才会报 "flutter_rust_bridge has not been initialized"。
+      # 这里对产物做硬校验，缺库直接让流水线失败。
+      - name: Verify librhttp.so is packaged
+        run: |
+          set -euo pipefail
+          for apk in dist/*.apk; do
+            echo "--- checking $apk ---"
+            LIBS="$(unzip -l "$apk" | grep -o 'lib/[^ ]*/librhttp\.so' | sort -u || true)"
+            echo "${LIBS:-<none>}"
+            if [ -z "$LIBS" ]; then
+              echo "::error::librhttp.so missing from $apk (cargokit silently skipped the Rust build)"
+              exit 1
+            fi
+          done
+          echo "librhttp.so present in all APKs"
+
       - uses: actions/upload-artifact@v4
         with:
           name: venera-nas-apk
