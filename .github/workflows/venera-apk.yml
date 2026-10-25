@@ -1,9 +1,15 @@
 # 构建改版 APK（含 NAS 客户端）。
 #
-# 说明：
-#   - 本仓库 `android/app/build.gradle` 在配置阶段就 `load(key.properties)`，
-#     缺文件会直接失败，因此必须先从 secret 还原签名材料。
-#   - Flutter 版本由 pubspec.yaml 驱动（项目锁定 3.41.4），避免 AGP DSL 漂移。
+# 设计要点（都是踩坑后确定的）：
+#   1. 不要用 android-actions/setup-android@v3：它会执行
+#      `sdkmanager --install tools`，而 "tools" 包早已从 SDK 仓库下线，
+#      导致 "Failed to find package 'tools'" 直接失败。
+#      GitHub 的 ubuntu-22.04 runner 已预装 Android SDK + cmdline-tools，
+#      且许可证已接受，Gradle 会自动补齐 ndkVersion 指定的 NDK。
+#   2. android/app/build.gradle 在配置阶段就 `load(key.properties)`，
+#      缺文件会在解析期直接失败，因此签名材料必须先还原。
+#   3. Flutter 版本由 pubspec.yaml 驱动（项目锁定 3.41.4），
+#      避免与本机/镜像的 Flutter 大版本差异引发 AGP DSL 变更问题。
 name: Build Venera APK (NAS)
 
 on:
@@ -24,7 +30,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ---- 签名材料（必须在 flutter build 之前还原）----
+      # 与上游一致：清掉预置 toolcache，避免 Flutter 版本混用
+      - name: Clean hosted toolcache
+        run: rm -rf /opt/hostedtoolcache
+
+      # ---- 签名材料（必须在 flutter build 之前）----
       - name: Restore signing material
         env:
           STORE_FILE: ${{ secrets.ANDROID_KEYSTORE }}
@@ -46,32 +56,58 @@ jobs:
           architecture: x64
           cache: true
 
-      - name: Set up Rust
-        # venera 依赖的若干插件用 Rust（rhttp / flutter_qjs 等）
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.85.1
-          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
-
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      # 读取 rust-toolchain.toml（1.85.1 + 3 个 android target），
+      # 并顺带安装 NDK 需要的链接工具链
+      - name: Set up Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          rustup show
 
-      - name: Install NDK
-        run: sdkmanager --install "ndk;28.0.13004108"
+      - name: Show toolchain versions
+        run: |
+          flutter --version
+          java -version
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls -1 "$ANDROID_HOME/ndk" 2>/dev/null || echo "no ndk preinstalled"
+
+      # build.gradle 里写死了 ndkVersion "28.0.13004108"，
+      # 缺这个精确版本 Gradle 会报 "NDK not configured"。
+      # 镜像通常已带；没有则按需安装（不碰已下线的 "tools" 包）。
+      - name: Ensure NDK 28.0.13004108
+        run: |
+          SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          TARGET="28.0.13004108"
+          if [ -d "$SDK/ndk/$TARGET" ]; then
+            echo "NDK $TARGET already present"
+            exit 0
+          fi
+          echo "Installing NDK $TARGET ..."
+          SM="$(find "$SDK/cmdline-tools" -maxdepth 2 -name sdkmanager -type f | sort | tail -1)"
+          echo "using sdkmanager: $SM"
+          yes | "$SM" --licenses >/dev/null 2>&1 || true
+          "$SM" --install "ndk;$TARGET"
+          ls -1 "$SDK/ndk"
 
       - run: flutter pub get
+
+      # 上游存在少量历史遗留 lint（如 file_downloader.dart 的误报），
+      # 这里只作为信息输出，不阻断 APK 产出
+      - name: Analyze (report only)
+        continue-on-error: true
+        run: flutter analyze lib
 
       - name: Run tests
         run: flutter test
 
       # build.gradle 已开启 splits（abi + universalApk），
-      # 因此这一条命令会同时产出 3 个按 ABI 拆分的包 + 1 个通用包。
+      # 这一条命令会同时产出 3 个按 ABI 拆分的包 + 1 个通用包。
       - name: Build release APK
         run: flutter build apk --release
 
