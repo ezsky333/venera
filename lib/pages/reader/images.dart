@@ -38,6 +38,20 @@ class _ReaderImagesState extends State<_ReaderImages> {
   void load() async {
     if (inProgress) return;
     inProgress = true;
+
+    // ---- NAS 优先（新增）----
+    // 优先级：本地已下载 > NAS 缓存 > 源网络加载
+    //
+    // 之所以把 NAS 放在本地之后：本地文件无网络开销，且用户可能刻意保留
+    // 离线副本。NAS 只是"本地没有时更好的来源"。
+    if (reader.type != ComicType.local) {
+      var viaNas = await _tryLoadFromNas();
+      if (viaNas) {
+        context.readerScaffold.update();
+        return;
+      }
+    }
+
     if (reader.type == ComicType.local ||
         (LocalManager().isDownloaded(
           reader.cid,
@@ -92,6 +106,54 @@ class _ReaderImagesState extends State<_ReaderImages> {
       }
     }
     context.readerScaffold.update();
+  }
+
+  /// 尝试从 NAS 读取当前章节。
+  ///
+  /// 返回 true 表示已成功填充 [reader.images]，调用方应直接返回。
+  /// 任何失败（未配置/离线/未缓存/出错）都返回 false，让流程回退到原有逻辑——
+  /// NAS 绝不能成为阅读的阻塞点。
+  Future<bool> _tryLoadFromNas() async {
+    if (!NasClient.instance.isEnabled) return false;
+    // 只有已下载到本地的判定优先，本地没命中才问 NAS
+    if (LocalManager().isDownloaded(
+      reader.cid,
+      reader.type,
+      reader.chapter,
+      reader.widget.chapters,
+    )) {
+      return false;
+    }
+
+    final chapters = reader.widget.chapters;
+    if (chapters == null) return false;
+    final chapterId = chapters.ids.elementAtOrNull(reader.chapter - 1);
+    if (chapterId == null) return false;
+
+    final sourceKey = reader.type.comicSource?.key;
+
+    try {
+      final chapter = await NasClient.instance.findChapter(
+        sourceKey: sourceKey!,
+        comicId: reader.widget.cid,
+        chapterId: chapterId,
+      );
+      if (chapter == null || chapter.pages.isEmpty) return false;
+      if (!mounted) return false;
+      setState(() {
+        reader.images = chapter.pages;
+        reader.isLoading = false;
+        inProgress = false;
+        _handleJumpToLastPage();
+        Future.microtask(() {
+          reader.updateHistory();
+        });
+      });
+      return true;
+    } catch (e) {
+      // NAS 出错一律静默降级
+      return false;
+    }
   }
 
   @override

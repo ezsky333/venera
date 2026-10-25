@@ -30,6 +30,7 @@ import 'package:venera/foundation/image_provider/cached_image.dart';
 import 'package:venera/foundation/image_provider/reader_image.dart';
 import 'package:venera/foundation/local.dart';
 import 'package:venera/foundation/log.dart';
+import 'package:venera/foundation/nas_client.dart';
 import 'package:venera/foundation/res.dart';
 import 'package:venera/network/images.dart';
 import 'package:venera/pages/settings/settings_page.dart';
@@ -38,6 +39,7 @@ import 'package:venera/utils/data_sync.dart';
 import 'package:venera/utils/ext.dart';
 import 'package:venera/utils/file_type.dart';
 import 'package:venera/utils/io.dart';
+import 'package:venera/utils/nas_sync.dart';
 import 'package:venera/utils/tags_translation.dart';
 import 'package:venera/utils/translations.dart';
 import 'package:venera/utils/volume.dart';
@@ -364,6 +366,9 @@ class _ReaderState extends State<Reader>
       _updateHistoryTimer?.cancel();
       _updateHistoryTimer = Timer(const Duration(seconds: 1), () {
         HistoryManager().addHistoryAsync(history!);
+        // 阅读进度同步到 NAS：复用同一个 1s 防抖窗口，
+        // 因此快速翻页只会产生最后一次进度，不会淹没同步队列。
+        NasSync().onHistoryUpdated(history!);
         _updateHistoryTimer = null;
       });
     }

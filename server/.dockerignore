@@ -1,0 +1,9 @@
+# 忽略构建产物与本地运行数据
+venera-nas.exe
+venera-nas
+/dist/
+/runtime/
+/data/
+/library/
+*.log
+probe-page-*.bin

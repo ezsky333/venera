@@ -1,0 +1,45 @@
+services:
+  venera-nas:
+    image: ghcr.io/venera-app/venera-nas:latest
+    # 想本地构建就换成下面两行：
+    # build: .
+    # image: venera-nas:local
+    container_name: venera-nas
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # ---- 必填 ----
+      # 客户端访问用的共享密钥。留空则不鉴权（仅建议纯内网）。
+      VENERA_TOKEN: "change-me-to-a-long-random-string"
+      # ---- 推荐 ----
+      # 反代场景填外部可访问地址，服务端据此生成图片绝对 URL
+      # VENERA_PUBLIC_BASE_URL: "https://nas.example.com"
+      # 同时运行的源数量（每个 = 一个 JS VM）
+      VENERA_WORKERS: "3"
+      # 单章内图片并发数
+      VENERA_DOWNLOAD_CONCURRENCY: "4"
+      # 每站点请求速率上限（避免触发反爬）
+      VENERA_GLOBAL_RPS: "3"
+      # 同步到收藏后是否自动排队下载
+      VENERA_AUTO_DOWNLOAD_FAVORITES: "true"
+      # WebDAV 老客户端兼容（W1 兜底）
+      VENERA_WEBDAV_USER: "venera"
+      VENERA_WEBDAV_PASS: "change-me-too"
+      TZ: "Asia/Shanghai"
+    volumes:
+      # 元数据/数据库/源脚本：体积小，建议放 SSD
+      - ./data:/data
+      # 漫画文件：体积大，指向大容量存储池
+      - ./library:/library
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    # 下载大量图片时可能占用较多文件描述符
+    ulimits:
+      nofile:
+        soft: 8192
+        hard: 16384

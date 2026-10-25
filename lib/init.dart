@@ -10,6 +10,7 @@ import 'package:venera/foundation/cache_manager.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/js_engine.dart';
 import 'package:venera/foundation/log.dart';
+import 'package:venera/foundation/nas_client.dart';
 import 'package:venera/network/cookie_jar.dart';
 import 'package:venera/pages/comic_source_page.dart';
 import 'package:venera/pages/follow_updates_page.dart';
@@ -17,6 +18,7 @@ import 'package:venera/pages/settings/settings_page.dart';
 import 'package:venera/utils/app_links.dart';
 import 'package:venera/utils/handle_text_share.dart';
 import 'package:venera/utils/opencc.dart';
+import 'package:venera/utils/nas_sync.dart';
 import 'package:venera/utils/tags_translation.dart';
 import 'package:venera/utils/translations.dart';
 import 'foundation/appdata.dart';
@@ -54,6 +56,20 @@ Future<void> init() async {
   }
   CacheManager().setLimitSize(appdata.settings['cacheSize']);
   _checkOldConfigs();
+
+  // NAS 服务端：载入配置并在后台做一次增量同步。
+  // 失败不影响启动（网络未就绪时很常见），下次操作会重试。
+  NasClient.instance.load();
+  if (NasClient.instance.isEnabled) {
+    Future.microtask(() async {
+      try {
+        await NasSync().syncNow(full: false);
+      } catch (e) {
+        Log.error("NAS", "startup sync failed: $e");
+      }
+    });
+  }
+
   if (App.isAndroid) {
     handleLinks();
     handleTextShare();

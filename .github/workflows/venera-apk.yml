@@ -1,0 +1,90 @@
+# 构建改版 APK（含 NAS 客户端）。
+#
+# 说明：
+#   - 本仓库 `android/app/build.gradle` 在配置阶段就 `load(key.properties)`，
+#     缺文件会直接失败，因此必须先从 secret 还原签名材料。
+#   - Flutter 版本由 pubspec.yaml 驱动（项目锁定 3.41.4），避免 AGP DSL 漂移。
+name: Build Venera APK (NAS)
+
+on:
+  push:
+    tags: ["v*"]
+    branches: [master, main]
+    paths:
+      - "lib/**"
+      - "assets/**"
+      - "pubspec.yaml"
+      - "android/**"
+      - ".github/workflows/venera-apk.yml"
+  workflow_dispatch:
+
+jobs:
+  apk:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---- 签名材料（必须在 flutter build 之前还原）----
+      - name: Restore signing material
+        env:
+          STORE_FILE: ${{ secrets.ANDROID_KEYSTORE }}
+          PROPERTY_FILE: ${{ secrets.ANDROID_KEY_PROPERTIES }}
+        run: |
+          if [ -z "$STORE_FILE" ] || [ -z "$PROPERTY_FILE" ]; then
+            echo "::error::ANDROID_KEYSTORE / ANDROID_KEY_PROPERTIES secrets are missing"
+            exit 1
+          fi
+          echo "$STORE_FILE" | base64 --decode > android/keystore.jks
+          echo "$PROPERTY_FILE" > android/key.properties
+          ls -l android/keystore.jks android/key.properties
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version-file: pubspec.yaml
+          architecture: x64
+          cache: true
+
+      - name: Set up Rust
+        # venera 依赖的若干插件用 Rust（rhttp / flutter_qjs 等）
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.85.1
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install NDK
+        run: sdkmanager --install "ndk;28.0.13004108"
+
+      - run: flutter pub get
+
+      - name: Run tests
+        run: flutter test
+
+      # build.gradle 已开启 splits（abi + universalApk），
+      # 因此这一条命令会同时产出 3 个按 ABI 拆分的包 + 1 个通用包。
+      - name: Build release APK
+        run: flutter build apk --release
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p dist
+          find build/app/outputs/apk/release -name "*.apk" -type f -exec cp -v {} dist/ \;
+          echo "=== artifacts ==="
+          ls -lh dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: venera-nas-apk
+          path: dist/*.apk
+          retention-days: 90
+          if-no-files-found: error

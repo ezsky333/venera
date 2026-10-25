@@ -75,12 +75,14 @@ abstract mixin class _ComicPageActions {
     if (folder is! String) {
       return;
     }
+    var item = _toFavoriteItem();
     LocalFavoritesManager().addComic(
       folder,
-      _toFavoriteItem(),
+      item,
       null,
       comic.findUpdateTime(),
     );
+    NasSync().onFavoriteAdded(item);
     isAddToLocalFav = true;
     update();
     App.rootContext.showMessage(message: "Added".tl);
@@ -130,6 +132,79 @@ abstract mixin class _ComicPageActions {
   }
 
   void onReadEnd();
+
+  /// 把这部漫画下载到 NAS（服务端异步执行）。
+  ///
+  /// 与 [download]（下载到本机）是两条独立路径：NAS 上的副本可以在所有
+  /// 设备间共享，本机副本只对当前设备可见。
+  Future<void> downloadToNas() async {
+    final client = NasClient.instance;
+    if (!client.isEnabled) {
+      App.rootContext.showMessage(
+        message: "NAS is not configured. Set it up in Settings.".tl,
+      );
+      return;
+    }
+
+    // 先探活，给出明确反馈而不是静默失败
+    if (!await client.probe(force: true)) {
+      App.rootContext.showMessage(
+        message: "NAS is unreachable. Check the connection.".tl,
+      );
+      return;
+    }
+
+    // 已缓存则直接提示
+    try {
+      final cached = await client.cachedChapters(comic.sourceKey, comic.id);
+      final total = comic.chapters?.length ?? 0;
+      if (total > 0 && cached.length >= total) {
+        App.rootContext.showMessage(message: "Already cached on NAS".tl);
+        return;
+      }
+    } catch (_) {
+      // 查询失败不阻断下载请求
+    }
+
+    final jobId = await client.requestDownload(
+      sourceKey: comic.sourceKey,
+      comicId: comic.id,
+      title: comic.title,
+    );
+    if (jobId == null) {
+      App.rootContext.showMessage(message: "Failed to queue NAS download".tl);
+      return;
+    }
+    App.rootContext.showMessage(
+      message: "Queued on NAS (job #$jobId)".tl,
+    );
+
+    // 轻量进度反馈：轮询直到完成或失败（避免用户不知道进度）
+    _watchNasJob(client, jobId);
+  }
+
+  /// 轮询 NAS 任务进度，结束后提示。
+  void _watchNasJob(NasClient client, int jobId) async {
+    for (var i = 0; i < 120; i++) {
+      await Future.delayed(const Duration(seconds: 5));
+      final job = await client.getJob(jobId);
+      if (job == null) continue;
+      final status = job['status']?.toString() ?? '';
+      if (status == 'done') {
+        App.rootContext.showMessage(
+          message: "NAS download complete".tl,
+        );
+        return;
+      }
+      if (status == 'failed') {
+        App.rootContext.showMessage(
+          message: "NAS download failed: ${job['error'] ?? 'unknown'}".tl,
+        );
+        return;
+      }
+      if (status == 'cancelled') return;
+    }
+  }
 
   void download() async {
     if (LocalManager().isDownloading(comic.id, comic.comicType)) {

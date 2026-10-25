@@ -17,6 +17,7 @@ import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/history.dart';
 import 'package:venera/foundation/image_provider/cached_image.dart';
 import 'package:venera/foundation/local.dart';
+import 'package:venera/foundation/nas_client.dart';
 import 'package:venera/foundation/res.dart';
 import 'package:venera/network/download.dart';
 import 'package:venera/network/cache.dart';
@@ -24,6 +25,7 @@ import 'package:venera/pages/favorites/favorites_page.dart';
 import 'package:venera/pages/reader/reader.dart';
 import 'package:venera/utils/file_type.dart';
 import 'package:venera/utils/io.dart';
+import 'package:venera/utils/nas_sync.dart';
 import 'package:venera/utils/tags_translation.dart';
 import 'package:venera/utils/translations.dart';
 import 'dart:math' as math;
@@ -384,6 +386,14 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
                   text: 'Download'.tl,
                   onPressed: download,
                   iconColor: context.useTextColor(Colors.cyan),
+                ),
+              // 仅在配置了 NAS 时显示，避免打扰未使用该功能的用户
+              if (NasClient.instance.isEnabled && !isDownloaded)
+                _ActionButton(
+                  icon: const Icon(Icons.cloud_download_outlined),
+                  text: 'NAS'.tl,
+                  onPressed: downloadToNas,
+                  iconColor: context.useTextColor(Colors.teal),
                 ),
               if (data!.isLiked != null)
                 _ActionButton(

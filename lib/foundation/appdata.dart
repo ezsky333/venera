@@ -237,6 +237,11 @@ class Settings with ChangeNotifier {
     'showChapterComments': true, // show chapter comments in reader
     'showChapterCommentsAtEnd':
         false, // show chapter comments at end of chapter
+    // NAS 服务端配置（W2 同步 + 远程缓存）。
+    // 形如 {baseUrl, token, clientId, cursor}；null 表示未配置。
+    'nas': null,
+    // NAS 客户端标识，用于多设备同步的回显抑制。
+    'nasClientId': null,
   };
 
   operator [](String key) {

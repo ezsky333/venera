@@ -140,6 +140,13 @@ class _AppSettingsState extends State<AppSettings> {
           },
           actionTitle: 'Set'.tl,
         ).toSliver(),
+        _CallbackSetting(
+          title: "NAS Server".tl,
+          callback: () async {
+            showPopUpWidget(context, const NasSetting());
+          },
+          actionTitle: 'Set'.tl,
+        ).toSliver(),
         _SettingPartTitle(
           title: "User".tl,
           icon: Icons.person_outline,

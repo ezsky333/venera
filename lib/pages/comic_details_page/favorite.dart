@@ -524,6 +524,8 @@ class _LocalSectionState extends State<_LocalSection> {
                     widget.cid,
                     widget.type,
                   );
+                  // 同步到 NAS（入队，由 NasSync 批量合并上传）
+                  NasSync().onFavoriteRemoved(folder, widget.favoriteItem);
                   setState(() {
                     localAdded.remove(folder);
                   });
@@ -535,6 +537,7 @@ class _LocalSectionState extends State<_LocalSection> {
                     null,
                     widget.updateTime,
                   );
+                  NasSync().onFavoriteAdded(widget.favoriteItem);
                   setState(() {
                     localAdded.add(folder);
                   });
