@@ -328,6 +328,26 @@ class NasSync with ChangeNotifier {
       Log.error('NAS Sync', 'bootstrap: read history failed: $e');
     }
 
+    // ---- 源配置（账号、密码、baseUrl 等自定义项）----
+    // 首次连接必须把 App 里各站点的私有配置推给服务端，否则服务端拿着
+    // 空配置去下载收藏，会得到 "invalid url: null/comics/..." 这类报错
+    // （picacg 的 apiUrl 为空就是这样）。
+    try {
+      for (final source in ComicSourceManager().all()) {
+        final data = source.data;
+        if (data.isEmpty) continue;
+        ops.add({
+          'type': 'source.data',
+          'payload': {
+            'source': source.key,
+            'data': Map<String, dynamic>.from(data),
+          },
+        });
+      }
+    } catch (e) {
+      Log.error('NAS Sync', 'bootstrap: read source configs failed: $e');
+    }
+
     if (ops.isEmpty) return;
     Log.info('NAS Sync', 'bootstrap: pushing ${ops.length} existing records');
 

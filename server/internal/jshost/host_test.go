@@ -70,6 +70,7 @@ function setTimeout(cb, ms) { sendMessage({method:'delay', time: ms}).then(cb); 
 class ComicSource {
 	key = "";
 	loadData(k) { return sendMessage({method:'load_data', key:this.key, data_key:k}); }
+	loadSetting(k) { return sendMessage({method:'load_setting', key:this.key, setting_key:k}); }
 	saveData(k, v) { return sendMessage({method:'save_data', key:this.key, data_key:k, data:v}); }
 }
 `
@@ -196,8 +197,74 @@ func TestSourceDataPersistence(t *testing.T) {
 	}
 }
 
-func TestPromiseRejectionPropagates(t *testing.T) {
-	h := newTestHost(t, `class T extends ComicSource { key = "test"; }`)
+// loadSetting 必须返回 App 同步过来的真实设置值。
+// 回归背景：服务端此前对该请求一律返回 null，源脚本把
+// `${loadSetting('base_url')}/comics/x` 拼成 "null/comics/x"，
+// 导致 picacg 等源全部报 invalid url。
+func TestLoadSettingReadsSyncedValue(t *testing.T) {
+	ms := newMemStore()
+	ms.data["picacg"] = map[string]any{
+		"settings": map[string]any{
+			"base_url":   "https://api.example.com",
+			"appChannel": "1",
+			"nested":     map[string]any{"deep": "v"},
+		},
+		"account": []any{"user", "pass"},
+	}
+	h, err := New(Options{
+		SourceKey: "picacg",
+		InitJS:    testInitJS,
+		SourceJS: `class T extends ComicSource {
+			key = "picacg";
+			settings = {
+				base_url: { title: "API address", type: "input", default: "https://api.example.com" },
+				appChannel: { type: "select", default: "3" },
+			};
+		}`,
+		Store:   ms,
+		Timeout: defaultTestTimeout,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	go h.RunLoop()
+
+	cases := []struct{ expr, want string }{
+		{`__source.loadSetting("base_url")`, "https://api.example.com"},
+		{`__source.loadSetting("appChannel")`, "1"},
+		{`__source.loadSetting("nested.deep")`, "v"},
+	}
+	for _, c := range cases {
+		out, err := h.Call(c.expr)
+		if err != nil {
+			t.Fatalf("%s: %v", c.expr, err)
+		}
+		if got := out.String(); got != c.want {
+			t.Errorf("%s = %q, want %q", c.expr, got, c.want)
+		}
+	}
+
+	// 未设置的键必须回落到源脚本声明的 default，
+	// 而不是把 undefined 拼进 URL。
+	for _, c := range []struct{ key, want string }{
+		{"base_url", "https://api.example.com"}, // 库里没存 → 用 default
+		{"not_declared", "undefined"},
+	} {
+		out, err := h.Call(`(() => {
+			const v = __source.loadSetting(` + "`" + c.key + "`" + `);
+			return v === undefined ? "undefined" : String(v);
+		})()`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out.String() != c.want {
+			t.Errorf("loadSetting(%q) = %q, want %q", c.key, out.String(), c.want)
+		}
+	}
+}
+
+func TestPromiseRejectionPropagates(t *testing.T) {	h := newTestHost(t, `class T extends ComicSource { key = "test"; }`)
 	_, err := h.Call(`(async () => { throw new Error("boom"); })()`)
 	if err == nil {
 		t.Fatal("expected error from rejected promise")

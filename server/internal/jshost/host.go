@@ -267,8 +267,7 @@ func (h *Host) dispatch(arg goja.Value) goja.Value {
 		return goja.Undefined()
 
 	case "load_setting":
-		// 服务端没有交互式设置界面；返回 null 让源使用自身默认值。
-		return goja.Null()
+		return h.loadSetting(fmt.Sprint(msg["key"]), fmt.Sprint(msg["setting_key"]))
 
 	case "isLogged":
 		return vm.ToValue(h.isLogged())
@@ -350,8 +349,105 @@ func (h *Host) loadData(key, dataKey string) goja.Value {
 	return h.valueFrom(v)
 }
 
-func (h *Host) saveData(key, dataKey string, data any) {
-	if h.opts.Store == nil || dataKey == "setting" {
+// loadSetting 读取源的自定义设置（源脚本里 settings 声明的那批键）。
+//
+// 与 App 的 js_engine.dart 保持同一套回退顺序：
+//
+//	1. 用户保存过的值（来自 source_data.data["settings"]）
+//	2. 源脚本里该键声明的 default
+//
+// 服务端此前一律返回 null，源脚本把 `${loadSetting('base_url')}/comics/x`
+// 拼成 "null/comics/x"（picacg 的经典报错）。只做第 1 步也不够：
+// 用户没改过的设置压根不在 source_data 里，必须回落到脚本的 default。
+func (h *Host) loadSetting(key, settingKey string) goja.Value {
+	if settingKey == "" {
+		return goja.Undefined()
+	}
+
+	// 1) 用户保存的值
+	if h.opts.Store != nil {
+		if data, err := h.opts.Store.GetSourceData(key); err == nil {
+			if settings, ok := data["settings"]; ok && settings != nil {
+				if v, ok := lookupSetting(settings, settingKey); ok && v != nil {
+					return h.valueFrom(v)
+				}
+			}
+		}
+	}
+
+	// 2) 源脚本声明的默认值
+	if def, ok := h.settingDefault(settingKey); ok {
+		return def
+	}
+	return goja.Undefined()
+}
+
+// settingDefault 从已实例化的源对象上读 settings[key].default。
+func (h *Host) settingDefault(settingKey string) (goja.Value, bool) {
+	if h.vm == nil {
+		return nil, false
+	}
+	src := h.source
+	if src == nil || goja.IsUndefined(src) || goja.IsNull(src) {
+		return nil, false
+	}
+	obj, ok := src.(*goja.Object)
+	if !ok {
+		return nil, false
+	}
+	settings := obj.Get("settings")
+	if settings == nil || goja.IsUndefined(settings) || goja.IsNull(settings) {
+		return nil, false
+	}
+	sObj, ok := settings.(*goja.Object)
+	if !ok {
+		return nil, false
+	}
+	// 支持 "a.b.c" 形式的嵌套键
+	var cur goja.Value = sObj
+	for _, part := range strings.Split(settingKey, ".") {
+		o, ok := cur.(*goja.Object)
+		if !ok {
+			return nil, false
+		}
+		cur = o.Get(part)
+		if cur == nil || goja.IsUndefined(cur) || goja.IsNull(cur) {
+			return nil, false
+		}
+	}
+	spec, ok := cur.(*goja.Object)
+	if !ok {
+		return nil, false
+	}
+	def := spec.Get("default")
+	if def == nil || goja.IsUndefined(def) || goja.IsNull(def) {
+		return nil, false
+	}
+	return def, true
+}
+
+// lookupSetting 支持 "a.b.c" 形式的嵌套键，也兼容扁平键。
+func lookupSetting(node any, path string) (any, bool) {
+	if m, ok := node.(map[string]any); ok {
+		if v, ok := m[path]; ok {
+			return v, true
+		}
+	}
+	cur := node
+	for _, part := range strings.Split(path, ".") {
+		m, ok := cur.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		cur, ok = m[part]
+		if !ok {
+			return nil, false
+		}
+	}
+	return cur, true
+}
+
+func (h *Host) saveData(key, dataKey string, data any) {	if h.opts.Store == nil || dataKey == "setting" {
 		return
 	}
 	val := exportToPlain(data)
