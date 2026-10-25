@@ -35,18 +35,46 @@ jobs:
         run: rm -rf /opt/hostedtoolcache
 
       # ---- 签名材料（必须在 flutter build 之前）----
+      #
+      # 两个必须注意的点：
+      #   1. build.gradle 用 rootProject.file("key.properties")，
+      #      文件必须放在 android/key.properties。
+      #   2. signingConfigs 里 storeFile file(...) 相对 **app 模块** 解析
+      #      （即 android/app/），不是 android/，否则会报
+      #      "Keystore file '.../android/app/keystore.jks' not found"。
+      #
+      # 为彻底消除歧义：keystore 放 android/app/，并把 storeFile
+      # 重写成绝对路径。
       - name: Restore signing material
         env:
           STORE_FILE: ${{ secrets.ANDROID_KEYSTORE }}
           PROPERTY_FILE: ${{ secrets.ANDROID_KEY_PROPERTIES }}
         run: |
-          if [ -z "$STORE_FILE" ] || [ -z "$PROPERTY_FILE" ]; then
+          set -euo pipefail
+          if [ -z "${STORE_FILE:-}" ] || [ -z "${PROPERTY_FILE:-}" ]; then
             echo "::error::ANDROID_KEYSTORE / ANDROID_KEY_PROPERTIES secrets are missing"
             exit 1
           fi
-          echo "$STORE_FILE" | base64 --decode > android/keystore.jks
+
+          KS="$PWD/android/app/keystore.jks"
+          echo "$STORE_FILE" | base64 --decode > "$KS"
+          cp "$KS" android/keystore.jks
+
+          # key.properties 放到 rootProject 读取的位置
           echo "$PROPERTY_FILE" > android/key.properties
-          ls -l android/keystore.jks android/key.properties
+          cp android/key.properties android/app/key.properties
+
+          # 两个文件里的 storeFile 都替换成绝对路径
+          for f in android/key.properties android/app/key.properties; do
+            sed -i "s|^storeFile=.*|storeFile=$KS|" "$f"
+            echo "--- $f ---"
+            cat "$f"
+          done
+
+          PW="$(sed -n 's/^storePassword=//p' android/key.properties | tr -d '\r\n')"
+          ALIAS="$(sed -n 's/^keyAlias=//p' android/key.properties | tr -d '\r\n')"
+          echo "=== keystore sanity check ==="
+          keytool -list -keystore "$KS" -storepass "$PW" -alias "$ALIAS" | head -5
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
