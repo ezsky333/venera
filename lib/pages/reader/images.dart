@@ -47,6 +47,7 @@ class _ReaderImagesState extends State<_ReaderImages> {
     if (reader.type != ComicType.local) {
       var viaNas = await _tryLoadFromNas();
       if (viaNas) {
+        _notifyLoadedFromNas();
         context.readerScaffold.update();
         return;
       }
@@ -107,6 +108,24 @@ class _ReaderImagesState extends State<_ReaderImages> {
     }
     context.readerScaffold.update();
   }
+
+  /// 提示"本章来自 NAS 缓存"。
+  ///
+  /// 阅读器是沉浸式全屏，加载瞬间还在转圈，所以延后一点点等首屏图片出来，
+  /// 否则提示会被 loading 盖住、用户根本看不到。
+  /// 每章只提示一次，翻章不重复打扰。
+  void _notifyLoadedFromNas() {
+    if (!mounted) return;
+    final key = '${reader.cid}_${reader.chapter}';
+    if (!_nasTipShown.add(key)) return;
+    Future.delayed(const Duration(milliseconds: 400), () {
+      if (!mounted) return;
+      context.showMessage(message: "Loaded from NAS".tl);
+    });
+  }
+
+  /// 已提示过 NAS 来源的章节，避免重复弹。
+  final Set<String> _nasTipShown = {};
 
   /// 尝试从 NAS 读取当前章节。
   ///

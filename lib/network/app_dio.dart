@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:rhttp/rhttp.dart' as rhttp;
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/log.dart';
+import 'package:venera/foundation/nas_client.dart';
 import 'package:venera/network/cache.dart';
 import 'package:venera/network/proxy.dart';
 
@@ -175,8 +176,14 @@ class AppDio with DioMixin {
 }
 
 class RHttpAdapter implements HttpClientAdapter {
-  Future<rhttp.ClientSettings> get settings async {
-    var proxy = await getProxy();
+  /// [uri] 为空表示不确定目标，按走代理处理（保持原有行为）。
+  Future<rhttp.ClientSettings> settingsFor(Uri? uri) async {
+    // NAS 在局域网内，必须直连：
+    //  1. 用户设置的代理可能根本访问不到内网地址；
+    //  2. 代理即使能连，也会把内网流量绕一圈，还可能改写/中断长连接。
+    // 这一步不能只靠 Dio 的 findProxy——图片走的是 rhttp(Rust)，
+    // 完全绕开了 Dart 侧的 HttpClient。
+    var proxy = (uri != null && _isNasOrLan(uri)) ? null : await getProxy();
 
     return rhttp.ClientSettings(
       proxySettings: proxy == null
@@ -195,6 +202,35 @@ class RHttpAdapter implements HttpClientAdapter {
         verifyCertificates: appdata.settings['ignoreBadCertificate'] != true,
       ),
     );
+  }
+
+  /// 目标是否为 NAS 地址或局域网地址（这些一律直连）。
+  static bool _isNasOrLan(Uri uri) {
+    // 1) 用户配置的 NAS 服务器
+    try {
+      final nasHost = NasClient.instance.config.baseUrl;
+      if (nasHost.isNotEmpty) {
+        final nas = Uri.tryParse(nasHost);
+        if (nas != null && nas.host == uri.host) return true;
+      }
+    } catch (_) {
+      // NasClient 未初始化时忽略
+    }
+    // 2) 回环与本机名
+    final host = uri.host.toLowerCase();
+    if (host == 'localhost' || host == '::1' || host.startsWith('127.')) {
+      return true;
+    }
+    // 3) 私有网段 10/8、172.16/12、192.168/16
+    final parts = host.split('.');
+    if (parts.length == 4) {
+      final a = int.tryParse(parts[0]);
+      final b = int.tryParse(parts[1]);
+      if (a == 10) return true;
+      if (a == 192 && b == 168) return true;
+      if (a == 172 && b != null && b >= 16 && b <= 31) return true;
+    }
+    return false;
   }
 
   static Map<String, List<String>> _getOverrides() {
@@ -230,7 +266,7 @@ class RHttpAdapter implements HttpClientAdapter {
     var res = await rhttp.Rhttp.request(
       method: rhttp.HttpMethod(options.method),
       url: options.uri.toString(),
-      settings: await settings,
+      settings: await settingsFor(options.uri),
       expectBody: rhttp.HttpExpectBody.stream,
       body: requestStream == null ? null : rhttp.HttpBody.stream(requestStream),
       headers: rhttp.HttpHeaders.rawMap(

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -191,6 +192,12 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		got := bearerToken(r)
 		if got == "" {
 			got = r.Header.Get("X-Api-Token")
+		}
+		// 图片/封面这类请求由 <img>/播放器直接发起，无法附加自定义 header，
+		// 所以接受 ?token= 查询参数。仅对只读的 media 路径放宽，
+		// 避免把 token 泄漏进会写数据的接口 URL 里。
+		if got == "" && strings.HasPrefix(r.URL.Path, "/api/v1/media/") {
+			got = r.URL.Query().Get("token")
 		}
 		// 常量时间比较，避免时序侧信道
 		if subtle.ConstantTimeCompare([]byte(got), []byte(s.cfg.Token)) != 1 {
@@ -436,11 +443,12 @@ func (s *Server) handleLibraryComic(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]chapterView, 0, len(chapters))
 	base := s.baseURL(r)
+	tq := s.mediaTokenQuery()
 	for _, c := range chapters {
 		v := chapterView{CachedChapter: c}
 		for i := 0; i < c.PageCount; i++ {
-			v.Pages = append(v.Pages, fmt.Sprintf("%s/api/v1/media/%s", base,
-				urlPathEscape(c.Dir)+fmt.Sprintf("/%d%s", i, s.pageExt(c.Dir, i))))
+			v.Pages = append(v.Pages, fmt.Sprintf("%s/api/v1/media/%s%s", base,
+				urlPathEscape(c.Dir)+fmt.Sprintf("/%d%s", i, s.pageExt(c.Dir, i)), tq))
 		}
 		out = append(out, v)
 	}
@@ -505,14 +513,15 @@ func (s *Server) handleChapter(w http.ResponseWriter, r *http.Request) {
 	}
 
 	base := s.baseURL(r)
+	tq := s.mediaTokenQuery()
 	pages := make([]string, 0, ch.PageCount)
 	for i := 0; i < ch.PageCount; i++ {
-		pages = append(pages, fmt.Sprintf("%s/api/v1/media/%s/%d%s", base,
-			urlPathEscape(ch.Dir), i, s.pageExt(ch.Dir, i)))
+		pages = append(pages, fmt.Sprintf("%s/api/v1/media/%s/%d%s%s", base,
+			urlPathEscape(ch.Dir), i, s.pageExt(ch.Dir, i), tq))
 	}
 	var cover string
 	if ch.Cover != "" {
-		cover = base + "/api/v1/media/" + urlPathEscape(ch.Cover)
+		cover = base + "/api/v1/media/" + urlPathEscape(ch.Cover) + tq
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"cached":  true,
@@ -522,6 +531,17 @@ func (s *Server) handleChapter(w http.ResponseWriter, r *http.Request) {
 		"bytes":   ch.Bytes,
 		"dir":     ch.Dir,
 	})
+}
+
+// mediaTokenQuery 返回附加在 media URL 上的鉴权查询串。
+//
+// 图片由 <img>/播放器直接拉取，加不了 Authorization header，
+// 只能把 token 放进 URL。未配置 token 时返回空串。
+func (s *Server) mediaTokenQuery() string {
+	if s.cfg.Token == "" {
+		return ""
+	}
+	return "?token=" + url.QueryEscape(s.cfg.Token)
 }
 
 // pageExt 探测页面文件的实际扩展名（落盘时按魔数决定了扩展名）。

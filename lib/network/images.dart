@@ -5,6 +5,7 @@ import 'package:flutter_qjs/flutter_qjs.dart';
 import 'package:venera/foundation/cache_manager.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/consts.dart';
+import 'package:venera/foundation/nas_client.dart';
 import 'package:venera/utils/image.dart';
 
 import 'app_dio.dart';
@@ -138,7 +139,11 @@ abstract class ImageDownloader {
     Future<Map<String, dynamic>?> Function()? onLoadFailed;
 
     var configs = <String, dynamic>{};
-    if (sourceKey != null) {
+    // NAS 返回的图片 URL 已经是可直取的绝对地址（自带 token），
+    // 不能再交给源脚本的 getImageLoadingConfig 处理——那些函数是为
+    // 源站图片设计的，会自行拼域名/加 Referer，把 NAS 的 ?token= 丢掉，
+    // 于是服务端返回 401。
+    if (sourceKey != null && !NasClient.isNasUrl(imageKey)) {
       var comicSource = ComicSource.find(sourceKey);
       configs = (await comicSource!.getImageLoadingConfig
               ?.call(imageKey, cid, eid)) ??

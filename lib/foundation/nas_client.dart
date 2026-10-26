@@ -178,8 +178,18 @@ class NasClient {
     await appdata.saveData();
   }
 
-  void _rebuildDio() {
-    if (!_config.isValid) {
+  /// 判断某个图片 URL 是否指向 NAS 服务。
+  ///
+  /// NAS 返回的 URL 自带 token、可直取，不能再交给源脚本的
+  /// getImageLoadingConfig 处理，否则 token 会被丢掉导致 401。
+  static bool isNasUrl(String url) {
+    if (url.isEmpty) return false;
+    final base = instance._config.baseUrl;
+    if (base.isEmpty) return false;
+    return url.startsWith(base);
+  }
+
+  void _rebuildDio() {    if (!_config.isValid) {
       _dio = null;
       return;
     }
