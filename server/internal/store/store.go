@@ -162,6 +162,7 @@ func (s *Store) migrate() error {
 			message     TEXT,
 			error       TEXT,
 			origin      TEXT,
+			attempts    INTEGER DEFAULT 0,
 			created_at  INTEGER,
 			updated_at  INTEGER
 		)`,
@@ -193,7 +194,41 @@ func (s *Store) migrate() error {
 			return fmt.Errorf("migrate %q: %w", q[:min(40, len(q))], err)
 		}
 	}
+	// 增量列：CREATE TABLE IF NOT EXISTS 不会给已存在的表补列。
+	if err := s.ensureColumn("jobs", "attempts", "INTEGER DEFAULT 0"); err != nil {
+		return err
+	}
 	return nil
+}
+
+// ensureColumn 在缺列时给表补上一列（幂等）。
+func (s *Store) ensureColumn(table, column, decl string) error {
+	rows, err := s.db.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, table))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			cid     int
+			name    string
+			typ     string
+			notNull int
+			dflt    any
+			pk      int
+		)
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = s.db.Exec(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, table, column, decl))
+	return err
 }
 
 func min(a, b int) int {

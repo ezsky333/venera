@@ -97,7 +97,9 @@ type Job struct {
 	Message  string    `json:"message,omitempty"`
 	Error    string    `json:"error,omitempty"`
 	// Origin 记录任务来源: manual / favorite-sync / follow
-	Origin    string    `json:"origin,omitempty"`
+	Origin string `json:"origin,omitempty"`
+	// Attempts 已执行次数，用于限制自动重试（0 表示从未执行）。
+	Attempts  int       `json:"attempts,omitempty"`
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
 }

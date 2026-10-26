@@ -107,6 +107,7 @@ func (s *Server) Handler() http.Handler {
 	api.HandleFunc("GET /api/v1/jobs", s.handleJobs)
 	api.HandleFunc("GET /api/v1/jobs/{id}", s.handleJob)
 	api.HandleFunc("POST /api/v1/jobs/{id}/cancel", s.handleCancelJob)
+	api.HandleFunc("POST /api/v1/jobs/retry", s.handleRetryFailed)
 
 	api.HandleFunc("GET /api/v1/sources", s.handleSources)
 	api.HandleFunc("POST /api/v1/sources/refresh", s.handleSourceRefresh)
@@ -677,8 +678,26 @@ func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"cancelled": true})
 }
 
-// ---------- 源管理 ----------
+// handleRetryFailed 把失败的任务重新排队（按漫画去重）。
+//
+// 典型场景：改了源配置、换了代理、或修了服务端 bug 之后，
+// 之前失败的几百个收藏不该被永久放弃，需要一次批量重试。
+func (s *Server) handleRetryFailed(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Source string `json:"source"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
 
+	n, err := s.st.RetryFailedJobs(req.Source)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	s.log.Info("retry", "requeued", n, "source", req.Source)
+	writeJSON(w, http.StatusOK, map[string]any{"requeued": n})
+}
+
+// ---------- 源管理 ----------
 func (s *Server) handleSources(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"sources": s.src.List()})
 }

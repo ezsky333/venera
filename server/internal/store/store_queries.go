@@ -509,11 +509,12 @@ func (s *Store) ClaimNextJob() (*model.Job, error) {
 	j := &model.Job{}
 	var chapters, title, message, errMsg, origin sql.NullString
 	var created, updated sql.NullInt64
+	var attempts sql.NullInt64
 	err = tx.QueryRow(
-		`SELECT id, source, comic_id, title, chapters, status, progress, message, error, origin, created_at, updated_at
+		`SELECT id, source, comic_id, title, chapters, status, progress, message, error, origin, created_at, updated_at, attempts
 		 FROM jobs WHERE status = 'pending' ORDER BY id ASC LIMIT 1`,
 	).Scan(&j.ID, &j.Source, &j.ComicID, &title, &chapters, &j.Status, &j.Progress,
-		&message, &errMsg, &origin, &created, &updated)
+		&message, &errMsg, &origin, &created, &updated, &attempts)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -524,6 +525,7 @@ func (s *Store) ClaimNextJob() (*model.Job, error) {
 	j.Message = message.String
 	j.Error = errMsg.String
 	j.Origin = origin.String
+	j.Attempts = int(attempts.Int64)
 	if _, err := tx.Exec(`UPDATE jobs SET status = 'running', updated_at = ? WHERE id = ?`,
 		time.Now().UnixMilli(), j.ID); err != nil {
 		return nil, err
@@ -547,12 +549,12 @@ func (s *Store) UpdateJob(id int64, status model.JobStatus, progress float64, me
 func (s *Store) GetJob(id int64) (*model.Job, error) {
 	j := &model.Job{}
 	var chapters, title, message, errMsg, origin sql.NullString
-	var created, updated sql.NullInt64
+	var created, updated, attempts sql.NullInt64
 	err := s.db.QueryRow(
-		`SELECT id, source, comic_id, title, chapters, status, progress, message, error, origin, created_at, updated_at
+		`SELECT id, source, comic_id, title, chapters, status, progress, message, error, origin, created_at, updated_at, attempts
 		 FROM jobs WHERE id = ?`, id,
 	).Scan(&j.ID, &j.Source, &j.ComicID, &title, &chapters, &j.Status, &j.Progress,
-		&message, &errMsg, &origin, &created, &updated)
+		&message, &errMsg, &origin, &created, &updated, &attempts)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -563,6 +565,7 @@ func (s *Store) GetJob(id int64) (*model.Job, error) {
 	j.Message = message.String
 	j.Error = errMsg.String
 	j.Origin = origin.String
+	j.Attempts = int(attempts.Int64)
 	j.CreatedAt = time.UnixMilli(created.Int64)
 	j.UpdatedAt = time.UnixMilli(updated.Int64)
 	_ = json.Unmarshal([]byte(chapters.String), &j.Chapters)
@@ -573,7 +576,7 @@ func (s *Store) ListJobs(status string, limit int) ([]model.Job, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
-	q := `SELECT id, source, comic_id, title, chapters, status, progress, message, error, origin, created_at, updated_at FROM jobs`
+	q := `SELECT id, source, comic_id, title, chapters, status, progress, message, error, origin, created_at, updated_at, attempts FROM jobs`
 	var args []any
 	if status != "" {
 		q += ` WHERE status = ?`
@@ -591,15 +594,16 @@ func (s *Store) ListJobs(status string, limit int) ([]model.Job, error) {
 	for rows.Next() {
 		var j model.Job
 		var chapters, title, message, errMsg, origin sql.NullString
-		var created, updated sql.NullInt64
+		var created, updated, attempts sql.NullInt64
 		if err := rows.Scan(&j.ID, &j.Source, &j.ComicID, &title, &chapters, &j.Status, &j.Progress,
-			&message, &errMsg, &origin, &created, &updated); err != nil {
+			&message, &errMsg, &origin, &created, &updated, &attempts); err != nil {
 			return nil, err
 		}
 		j.Title = title.String
 		j.Message = message.String
 		j.Error = errMsg.String
 		j.Origin = origin.String
+		j.Attempts = int(attempts.Int64)
 		j.CreatedAt = time.UnixMilli(created.Int64)
 		j.UpdatedAt = time.UnixMilli(updated.Int64)
 		_ = json.Unmarshal([]byte(chapters.String), &j.Chapters)
@@ -617,8 +621,48 @@ func (s *Store) RequeueStaleJobs() (int64, error) {
 	return res.RowsAffected()
 }
 
-// ---------- source registry ----------
+// BumpJobAttempt 把任务放回 pending 并累加执行次数，用于自动重试。
+// 返回受影响行数；0 表示任务状态已改变（例如被取消），调用方应放弃重试。
+func (s *Store) BumpJobAttempt(id int64, lastErr string) (int64, error) {
+	res, err := s.db.Exec(
+		`UPDATE jobs SET status = 'pending', attempts = COALESCE(attempts, 0) + 1,
+		        message = 'retry: ' || ?, error = ?, updated_at = ?
+		  WHERE id = ? AND status = 'running'`,
+		lastErr, lastErr, time.Now().UnixMilli(), id)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
 
+// RetryFailedJobs 把失败的任务重新放回队列，按漫画去重。
+//
+// 同一部漫画可能留下多条历史失败记录（每轮重试各一条），全部改回
+// pending 会让队列膨胀、并对同一部漫画重复下载。这里只复活每部漫画
+// 最新的一条失败记录，更早的直接跳过。
+//
+// source 为空表示所有源；否则只重试该源。
+func (s *Store) RetryFailedJobs(source string) (int64, error) {
+	q := `UPDATE jobs SET status = 'pending', progress = 0, message = 'retry',
+	          error = '', updated_at = ?
+	      WHERE status = 'failed'
+	        AND id IN (
+	            SELECT MAX(id) FROM jobs WHERE status = 'failed'
+	            GROUP BY source, comic_id
+	        )`
+	args := []any{time.Now().UnixMilli()}
+	if source != "" {
+		q += ` AND source = ?`
+		args = append(args, source)
+	}
+	res, err := s.db.Exec(q, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// ---------- source registry ----------
 func (s *Store) PutSource(key, name, version, file string) error {
 	_, err := s.db.Exec(
 		`INSERT INTO sources(key, name, version, file, installed_at, enabled) VALUES (?, ?, ?, ?, ?, 1)

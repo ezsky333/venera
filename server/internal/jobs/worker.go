@@ -3,6 +3,7 @@ package jobs
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -117,6 +118,15 @@ func (w *Worker) runJob(workerID int, job *model.Job) {
 	detail, err := w.run.LoadDetail(job.Source, job.ComicID)
 	if err != nil {
 		msg := fmt.Sprintf("load comic info: %v", err)
+
+		// 网络类抖动值得再试一次；配置/登录类错误重试只是浪费。
+		if job.Attempts < maxJobAttempts && isRetriableError(msg) {
+			if n, rerr := w.st.BumpJobAttempt(job.ID, msg); rerr == nil && n > 0 {
+				w.logf("job %d retry %d/%d: %s", job.ID, job.Attempts+1, maxJobAttempts, msg)
+				return
+			}
+		}
+
 		w.logf("job %d failed: %s", job.ID, msg)
 		_ = w.st.UpdateJob(job.ID, model.JobFailed, 0, "", msg)
 		return
@@ -131,6 +141,41 @@ func (w *Worker) runJob(workerID int, job *model.Job) {
 		return
 	}
 	w.logf("job %d done", job.ID)
+}
+
+// maxJobAttempts 是单个任务的最大执行次数（含首次）。
+const maxJobAttempts = 2
+
+// isRetriableError 判断失败是否属于"过一会儿再试可能就好了"。
+//
+// 只纳入网络/上游临时故障。像 invalid url、Custom domain is not set、
+// 登录失效这类是配置问题，重试不会改变结果，重排只会占住 worker。
+func isRetriableError(msg string) bool {
+	permanent := []string{
+		"invalid url:",
+		"Custom domain is not set",
+		"Setting not found",
+		"js rejected: TypeError",
+		"invalid login",
+		"401",
+		"403",
+	}
+	for _, p := range permanent {
+		if strings.Contains(msg, p) {
+			return false
+		}
+	}
+	retriable := []string{
+		"timeout", "i/o timeout", "EOF", "connection reset",
+		"429", "500", "502", "503", "504",
+		"no such host", "TLS handshake",
+	}
+	for _, p := range retriable {
+		if strings.Contains(msg, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // Enqueue 为一个漫画排队下载，带去重。
