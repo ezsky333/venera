@@ -27,6 +27,34 @@ abstract class ImageDownloader {
       );
     }
 
+    // ---- NAS 封面优先 ----
+    //
+    // 收藏夹、历史、详情页的封面都走 loadThumbnail（CachedImageProvider）。
+    // 之前只有 loadComicImage 有 NAS 兜底，导致"服务端明明有封面，
+    // 收藏夹和详情页却全空"——列表页加载的是收藏数据里的**源站 URL**，
+    // 源站不可达时没有第二来源。
+    //
+    // 前提：cid 非空（列表页 tile 都会传）；URL 已经是 NAS 地址则不需要。
+    // 离线模式打开时抢先取；失败（未缓存/未配置）继续原流程。
+    var triedNasCoverPreempt = false;
+    if (cid != null &&
+        cid.isNotEmpty &&
+        sourceKey != null &&
+        !NasClient.isNasUrl(url) &&
+        NasOfflineMode.instance.preferNasCover) {
+      triedNasCoverPreempt = true;
+      final nasBytes = await _tryNasCover(sourceKey, cid);
+      if (nasBytes != null) {
+        await CacheManager().writeCache(cacheKey, nasBytes);
+        yield ImageDownloadProgress(
+          currentBytes: nasBytes.length,
+          totalBytes: nasBytes.length,
+          imageBytes: nasBytes,
+        );
+        return;
+      }
+    }
+
     var configs = <String, dynamic>{};
     if (sourceKey != null) {
       var comicSource = ComicSource.find(sourceKey);
@@ -66,20 +94,47 @@ abstract class ImageDownloader {
       expectedBytes = null;
     }
     var buffer = <int>[];
-    await for (var data in stream) {
-      buffer.addAll(data);
-      if (expectedBytes != null) {
-        yield ImageDownloadProgress(
-          currentBytes: buffer.length,
-          totalBytes: expectedBytes,
-        );
+    try {
+      await for (var data in stream) {
+        buffer.addAll(data);
+        if (expectedBytes != null) {
+          yield ImageDownloadProgress(
+            currentBytes: buffer.length,
+            totalBytes: expectedBytes,
+          );
+        }
       }
-    }
 
-    if (configs['onResponse'] is JSInvokable) {
-      final uint8List = Uint8List.fromList(buffer);
-      buffer = (configs['onResponse'] as JSInvokable)([uint8List]);
-      (configs['onResponse'] as JSInvokable).free();
+      if (configs['onResponse'] is JSInvokable) {
+        final uint8List = Uint8List.fromList(buffer);
+        buffer = (configs['onResponse'] as JSInvokable)([uint8List]);
+        (configs['onResponse'] as JSInvokable).free();
+      }
+    } catch (e) {
+      // ---- NAS 封面兜底（无条件层）----
+      //
+      // 离线模式是"抢先取"；这里是"失败了再问"。源站封面偶尔 404/
+      // 超时/被防盗链拦下时，只要 NAS 存过这本书的封面就用它顶上，
+      // 不需要用户先打开离线模式开关。
+      // 抢先层已经取过（triedNasCoverPreempt）时不再重复请求。
+      if (cid != null &&
+          cid.isNotEmpty &&
+          sourceKey != null &&
+          !NasClient.isNasUrl(url) &&
+          !triedNasCoverPreempt &&
+          NasClient.instance.isEnabled) {
+        final nasBytes = await _tryNasCover(sourceKey, cid);
+        if (nasBytes != null) {
+          await CacheManager().writeCache(cacheKey, nasBytes);
+          yield ImageDownloadProgress(
+            currentBytes: nasBytes.length,
+            totalBytes: nasBytes.length,
+            imageBytes: nasBytes,
+          );
+          return;
+        }
+      }
+      rethrow;
     }
 
     await CacheManager().writeCache(cacheKey, buffer);
