@@ -658,17 +658,25 @@ type ImageConfig struct {
 	ModifyImageJS string `json:"modifyImageJS,omitempty"`
 }
 
-// ImageConfigFor 调用 getImageLoadingConfig(url, cid, eid)。
+// ImageConfigFor 取图片加载配置（对应 App 的 ImageLoadingConfig）。
 //
 // 这是下载链路上最易出错的一环：不同源用不同方式鉴权/解密。
+//
+// 与 App 的对齐点（lib/foundation/comic_source/parser.dart
+// _parseImageLoadingConfigFunc）：源把配置函数挂在 **comic.onImageLoad**，
+// 调用形如 comic.onImageLoad(url, comicId, ep)。jm 的切片重排
+// （modifyImage）与图床请求头都从这里给出——早期实现误调
+// s.getImageLoadingConfig（不存在），导致 jm 全部长图按原始
+// 打乱顺序落盘，阅读时满屏错位横条。
 func (m *Manager) ImageConfigFor(key, imageURL, comicID, ep string) (*ImageConfig, error) {
 	var cfg *ImageConfig
 	err := m.withHost(key, func(h *jshost.Host) error {
 		expr := fmt.Sprintf(`(async () => {
 			const s = __source;
 			const out = {};
-			if (s.getImageLoadingConfig) {
-				const c = await s.getImageLoadingConfig(%s, %s, %s);
+			const fn = s.comic && s.comic.onImageLoad;
+			if (typeof fn === "function") {
+				const c = await fn(%s, %s, %s);
 				if (c) {
 					if (c.url) out.url = String(c.url);
 					if (c.method) out.method = String(c.method);

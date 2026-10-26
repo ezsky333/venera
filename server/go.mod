@@ -4,6 +4,7 @@ go 1.26.1
 
 require (
 	github.com/dop251/goja v0.0.0-20261024144015-2a9269b6b6de
+	golang.org/x/image v0.47.0
 	golang.org/x/net v0.61.0
 	golang.org/x/text v0.43.0
 	modernc.org/sqlite v1.61.0

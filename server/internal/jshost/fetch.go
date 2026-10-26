@@ -41,6 +41,14 @@ func fetchImageWith(client HTTPDoer, rawURL string, headers map[string]string) (
 		return nil, err
 	}
 	for k, v := range headers {
+		// 关键：Accept-Encoding 必须剥离。Go 的 http.Transport 只在
+		// **自己**添加该头时才自动解压 gzip；调用方手动设置会关闭
+		// 自动解压，CDN 返回的压缩流被原样交给图片解码器
+		// （实测 jm：全章 45/45 "decode image: unknown format"）。
+		// App 的 dio 会自动解压，这里交给 transport 等价处理。
+		if strings.EqualFold(k, "Accept-Encoding") {
+			continue
+		}
 		if v != "" {
 			req.Header.Set(k, v)
 		}
