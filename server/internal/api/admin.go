@@ -222,6 +222,87 @@ func (s *Server) handleAdminComic(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// handleComicFallback 是详情页的**离线兜底**接口。
+//
+// 场景：客户端打开详情页时源站点不可达（超时/被墙/临时故障），
+// 原版行为是一直转圈或者报错。但只要 NAS 上存过这本漫画的元信息，
+// 就足以渲染一个可用的详情页：标题、封面、标签、以及已缓存的章节。
+//
+// 与 /api/v1/admin/comic 的区别：
+//   - 这个是给普通客户端用的，URL 里的封面/页面可直接加载；
+//   - 章节按客户端期望的结构返回（id + title），便于直接喂给阅读器。
+func (s *Server) handleComicFallback(w http.ResponseWriter, r *http.Request) {
+	srcKey := r.URL.Query().Get("source")
+	comicID := r.URL.Query().Get("comicId")
+	if srcKey == "" || comicID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "source and comicId are required"})
+		return
+	}
+
+	base := s.baseURL(r)
+	tq := s.mediaTokenQuery()
+
+	out := map[string]any{
+		"source": srcKey,
+		"comicId": comicID,
+		"cached":  false,
+	}
+
+	// 元信息
+	var title, subtitle, cover, tags string
+	if c, err := s.st.GetComic(srcKey, comicID); err == nil && c != nil {
+		title, subtitle, cover = c.Title, c.Subtitle, c.Cover
+		if len(c.Tags) > 0 {
+			if b, err := json.Marshal(c.Tags); err == nil {
+				tags = string(b)
+			}
+		}
+		out["title"] = title
+		out["subtitle"] = subtitle
+		out["tags"] = c.Tags
+	}
+
+	// 已缓存章节
+	chapters, err := s.st.ChaptersOf(srcKey, comicID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	if len(chapters) > 0 {
+		out["cached"] = true
+		// 转成客户端阅读器能直接用的形态
+		list := make([]map[string]any, 0, len(chapters))
+		for _, ch := range chapters {
+			list = append(list, map[string]any{
+				"id":    ch["chapterId"],
+				"title": ch["title"],
+				"pages": ch["pages"],
+			})
+		}
+		out["chapters"] = list
+
+		// 封面：优先用磁盘上的实际文件
+		if dir, ok := chapters[0]["dir"].(string); ok && dir != "" {
+			comicDir := dir
+			if i := strings.IndexByte(comicDir, '/'); i > 0 {
+				comicDir = comicDir[:i]
+			}
+			if p := s.probeCoverPath(comicDir); p != "" {
+				out["cover"] = base + "/api/v1/media/" + urlPathEscape(p) + tq
+			}
+		}
+	}
+
+	// 没有本地封面时回落到源站的封面 URL：
+	// 客户端加载失败会自动用占位图，比"整个详情页加载失败"好得多。
+	if _, ok := out["cover"]; !ok && cover != "" {
+		out["cover"] = cover
+	}
+	_ = tags
+
+	writeJSON(w, http.StatusOK, out)
+}
+
 // handleAdminIndex 返回内嵌面板。
 //
 // 注意：面板本身是静态资源，但其中调用的全是需要 token 的 API。

@@ -17,6 +17,7 @@ import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/history.dart';
 import 'package:venera/foundation/image_provider/cached_image.dart';
 import 'package:venera/foundation/local.dart';
+import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/nas_chapter_cache.dart';
 import 'package:venera/foundation/nas_client.dart';
 import 'package:venera/foundation/res.dart';
@@ -87,6 +88,9 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
   /// 刻意**不**阻塞首屏：NAS 只是增强，离线时必须和原版行为完全一致。
   @override
   NasChapterCache? nasCache;
+
+  /// 非空表示当前详情页是"NAS 降级"渲染的（源站不可达）。
+  NasComicFallback? nasFallback;
 
   @override
   void onReadEnd() {
@@ -285,7 +289,50 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
       widget.id,
       ComicType(widget.sourceKey.hashCode),
     );
-    return comicSource.loadComicInfo!(widget.id);
+
+    // ---- 源站失败时降级到 NAS ----
+    //
+    // 典型场景：pad 上打开一本收藏，源站点超时/被墙/临时故障。
+    // 原版行为是 NetworkError 页面——或者更糟：**一直转圈**。
+    // 后者是这次实测遇到的：picacg 的请求发出去了但永不返回，
+    // loadComicInfo 的 Future 一直挂起，await 永远等不到结果。
+    //
+    // 因此这里必须**主动加超时**，不能指望源自己报错。
+    // 超时时长取 12 秒：足够覆盖正常网络下最慢的详情页，
+    // 又不至于让用户对着转圈等到失去耐心。
+    Res<ComicDetails> res;
+    try {
+      res = await comicSource
+          .loadComicInfo!(widget.id)
+          .timeout(const Duration(seconds: 12));
+    } catch (e) {
+      Log.info('NAS', 'source loadComicInfo failed/timeout: $e');
+      res = Res.error(e.toString());
+    }
+    if (!res.error) return res;
+
+    if (!NasClient.instance.isEnabled) return res;
+
+    final fb = await NasClient.instance.comicFallback(
+      sourceKey: widget.sourceKey,
+      comicId: widget.id,
+    );
+    if (fb == null || fb.isEmpty) {
+      // NAS 也没有 → 保持原有错误提示，别把真实原因藏起来
+      return res;
+    }
+
+    nasFallback = fb;
+    Log.info(
+      'NAS',
+      'detail fallback for ${widget.sourceKey}/${widget.id}: '
+      '${fb.chapters.length} cached chapters',
+    );
+    return Res(
+      ComicDetails.fromJson(
+        nasFallbackToComicDetailsJson(fb, widget.sourceKey),
+      ),
+    );
   }
 
   @override
@@ -317,6 +364,15 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
         child: Text(comic.title),
       ),
       actions: [
+        // NAS 资源管理入口：只在启用且在线时出现。
+        // 放在 AppBar 而不是菜单里，是因为它是高频操作
+        // （"这本我已经下过了，删掉腾空间"）。
+        if (nasCache?.isAvailable == true)
+          IconButton(
+            tooltip: "NAS Storage".tl,
+            onPressed: showNasManage,
+            icon: const Icon(Icons.cloud_outlined),
+          ),
         IconButton(
           onPressed: showMoreActions,
           icon: const Icon(Icons.more_horiz),
@@ -737,7 +793,15 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
 
   Widget buildChapters() {
     if (comic.chapters == null) {
-      return const SliverPadding(padding: EdgeInsets.zero);
+      // 单章漫画（绅士漫画等）通常只给预览图、不返回章节列表，
+      // 于是 _ComicChapters 根本不会渲染，"这一章 NAS 有没有缓存"
+      // 就没有地方展示了。这里补一个独立的信息块顶上。
+      return _NasCacheInfoBar(
+        nasCache: nasCache,
+        comicId: comic.id,
+        sourceKey: widget.sourceKey,
+        title: comic.title,
+      );
     }
     _ensureNasCache();
     return _ComicChapters(

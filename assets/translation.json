@@ -492,16 +492,14 @@
     "NAS download failed": "NAS 下载失败",
     "Queued on NAS": "已加入 NAS 队列",
     "Queued": "等待中",
-    "Downloading": "下载中",
-    "Completed": "已完成",
     "Failed": "失败",
     "Cancelled": "已取消",
-    "All": "全部",
     "Server URL": "服务器地址",
     "Sync Sources from NAS": "从 NAS 同步漫画源",
     "No new sources from NAS": "NAS 上没有新的漫画源",
-    "Continue": "继续",
-    "Bearer token configured on the server": "服务端配置的访问令牌"
+    "Bearer token configured on the server": "服务端配置的访问令牌",
+    "Not cached on NAS": "NAS 未缓存",
+    "Re-download": "重新下载"
   },
   "zh_TW": {
     "Home": "首頁",
@@ -996,15 +994,13 @@
     "NAS download failed": "NAS 下載失敗",
     "Queued on NAS": "已加入 NAS 佇列",
     "Queued": "等待中",
-    "Downloading": "下載中",
-    "Completed": "已完成",
     "Failed": "失敗",
     "Cancelled": "已取消",
-    "All": "全部",
     "Server URL": "伺服器位址",
     "Sync Sources from NAS": "從 NAS 同步漫畫源",
     "No new sources from NAS": "NAS 上沒有新的漫畫源",
-    "Continue": "繼續",
-    "Bearer token configured on the server": "伺服器設定的存取權杖"
+    "Bearer token configured on the server": "伺服器設定的存取權杖",
+    "Not cached on NAS": "NAS 未快取",
+    "Re-download": "重新下載"
   }
 }

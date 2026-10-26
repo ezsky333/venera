@@ -469,6 +469,31 @@ abstract mixin class _ComicPageActions {
         ]);
   }
 
+  /// 打开 NAS 存储管理面板。
+  ///
+  /// 用户诉求原话是"详情页添加 NAS 资源管理的按钮，可以删除 NAS 资源"。
+  /// 做成独立面板而不是塞进长按菜单：管理是"看清单 + 批量删"的场景，
+  /// 需要一个能一次看到全部缓存章节的地方。
+  void showNasManage() {
+    final cache = nasCache;
+    if (cache == null || !cache.isAvailable) {
+      App.rootContext.showMessage(
+        message: "NAS is unreachable. Check the connection.".tl,
+      );
+      return;
+    }
+    showModalBottomSheet(
+      context: App.rootContext,
+      isScrollControlled: true,
+      builder: (_) => _NasStoragePanel(
+        cache: cache,
+        comicTitle: comic.title,
+        comicId: comic.id,
+        sourceKey: comic.sourceKey,
+      ),
+    );
+  }
+
   void showComments() {
     showSideBar(
       App.rootContext,

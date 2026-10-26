@@ -7,6 +7,7 @@
 //   Bad state: flutter_rust_bridge has not been initialized
 // NAS 是纯 HTTP/JSON，用系统 HTTP 栈更可靠，也避免和 Rust 生命周期耦合。
 import 'dart:io' show HttpClient, Platform;
+import 'dart:typed_data' show Uint8List;
 
 import 'package:dio/dio.dart';
 import 'package:dio/io.dart';
@@ -113,6 +114,117 @@ enum NasStatus {
 
   /// 在线
   online,
+}
+
+/// 详情页的 NAS 兜底数据。
+///
+/// 当源站不可达时用它渲染"降级版详情页"：
+/// 有标题、封面、标签、已缓存章节，用户可以直接读已缓存的内容。
+class NasComicFallback {
+  final String sourceKey;
+  final String comicId;
+  final String title;
+  final String subtitle;
+  final String cover;
+  final List<String> tags;
+
+  /// 已缓存章节：章节 id / 标题 / 页数。
+  final List<NasFallbackChapter> chapters;
+
+  const NasComicFallback({
+    required this.sourceKey,
+    required this.comicId,
+    required this.title,
+    this.subtitle = '',
+    this.cover = '',
+    this.tags = const [],
+    this.chapters = const [],
+  });
+
+  bool get isEmpty => chapters.isEmpty;
+
+  static NasComicFallback fromJson(Map<String, dynamic> m) {
+    final chs = <NasFallbackChapter>[];
+    final raw = m['chapters'];
+    if (raw is List) {
+      for (final e in raw) {
+        if (e is! Map) continue;
+        chs.add(NasFallbackChapter(
+          id: e['id']?.toString() ?? '',
+          title: e['title']?.toString() ?? '',
+          pages: (e['pages'] as num?)?.toInt() ?? 0,
+        ));
+      }
+    }
+    final tagsRaw = m['tags'];
+    final tags = <String>[];
+    if (tagsRaw is List) {
+      for (final t in tagsRaw) {
+        final s = t?.toString() ?? '';
+        if (s.isNotEmpty) tags.add(s);
+      }
+    }
+    return NasComicFallback(
+      sourceKey: m['source']?.toString() ?? '',
+      comicId: m['comicId']?.toString() ?? '',
+      title: m['title']?.toString() ?? '',
+      subtitle: m['subtitle']?.toString() ?? '',
+      cover: m['cover']?.toString() ?? '',
+      tags: tags,
+      chapters: chs,
+    );
+  }
+}
+
+/// 兜底数据里的单个章节。
+class NasFallbackChapter {
+  final String id;
+  final String title;
+  final int pages;
+
+  const NasFallbackChapter({
+    required this.id,
+    required this.title,
+    this.pages = 0,
+  });
+}
+
+/// 把 NAS 兜底数据转成 ComicDetails 的 JSON 形态。
+///
+/// 单独放在这里而不是给 ComicDetails 加构造器：ComicDetails 是源脚本
+/// 契约的一部分（JSON 形状固定），不该为了一个离线兜底而改它的 API。
+Map<String, dynamic> nasFallbackToComicDetailsJson(
+  NasComicFallback fb,
+  String sourceKey,
+) {
+  final chapters = <String, String>{};
+  for (final c in fb.chapters) {
+    // 章节标题可能为空（源没给），用 id 兜底，避免列表里出现空行
+    chapters[c.id] = c.title.isEmpty ? c.id : c.title;
+  }
+  return {
+    'title': fb.title.isEmpty ? fb.comicId : fb.title,
+    'subtitle': fb.subtitle,
+    'cover': fb.cover,
+    'description': null,
+    'tags': <String, List<String>>{
+      if (fb.tags.isNotEmpty) 'Tag': fb.tags,
+    },
+    'chapters': chapters,
+    'thumbnails': null,
+    'recommend': null,
+    'sourceKey': sourceKey,
+    'comicId': fb.comicId,
+    'isFavorite': null,
+    'subId': null,
+    'isLiked': null,
+    'likesCount': null,
+    'commentCount': null,
+    'uploader': null,
+    'uploadTime': null,
+    'updateTime': null,
+    'url': null,
+  };
 }
 
 /// NAS 客户端：封装 W2 同步协议与缓存查询。
@@ -540,6 +652,91 @@ class NasClient {
       return 'unknown';
     } catch (_) {
       return 'unknown';
+    }
+  }
+
+  /// 从 NAS 取漫画详情（源站不可达时的兜底）。
+  ///
+  /// 返回的数据只包含 NAS 已知的部分：标题/封面/标签 + 已缓存的章节。
+  /// 它不是源的完整详情（没有推荐、评论、点赞等），
+  /// 但足以让详情页**不再是死循环 loading**。
+  Future<NasComicFallback?> comicFallback({
+    required String sourceKey,
+    required String comicId,
+  }) async {
+    if (!isEnabled) return null;
+    final dio = _dio;
+    if (dio == null) return null;
+    try {
+      var res = await dio.get('/api/v1/comic', queryParameters: {
+        'source': sourceKey,
+        'comicId': comicId,
+      });
+      if (res.statusCode != 200 || res.data is! Map) return null;
+      final m = Map<String, dynamic>.from(res.data);
+      if (m['cached'] != true) return null;
+      return NasComicFallback.fromJson(m);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /// 取 NAS 上这本漫画的封面字节（用于源站封面加载失败时的降级）。
+  ///
+  /// 走 /api/v1/comic 拿到封面 URL 再下载：封面扩展名由服务端落盘时的
+  /// 魔数决定（png/jpg/webp 都可能），客户端猜不出来。
+  Future<Uint8List?> fetchNasImage({
+    required String sourceKey,
+    required String comicId,
+  }) async {
+    if (!isEnabled) return null;
+    final fb = await comicFallback(sourceKey: sourceKey, comicId: comicId);
+    final coverUrl = fb?.cover ?? '';
+    if (coverUrl.isEmpty) return null;
+    // 只接受 NAS 自己的地址：源站封面可能同样不可达，
+    // 在这里再试一次源站没有意义。
+    if (!isNasUrl(coverUrl)) return null;
+
+    final dio = _dio;
+    if (dio == null) return null;
+    try {
+      final res = await dio.get<List<int>>(
+        coverUrl,
+        options: Options(responseType: ResponseType.bytes),
+      );
+      if (res.statusCode != 200) return null;
+      final data = res.data;
+      if (data == null || data.isEmpty) return null;
+      return Uint8List.fromList(data);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 取这本漫画在 NAS 上的缓存章节明细（管理面板用）。
+  ///
+  /// 与 cachedChapters（只返回 id 集合）的区别：这个带页数/大小/时间，
+  /// 用于展示"占了多少空间、都是哪些章"。
+  /// 返回 null 表示请求失败（离线/未配置），空列表表示确实没有缓存。
+  Future<List<Map<String, dynamic>>?> comicChapters({
+    required String sourceKey,
+    required String comicId,
+  }) async {
+    if (!isEnabled) return null;
+    final dio = _dio;
+    if (dio == null) return null;
+    try {
+      final res = await dio.get('/api/v1/admin/chapters', queryParameters: {
+        'source': sourceKey,
+        'comicId': comicId,
+      });
+      if (res.statusCode != 200 || res.data is! Map) return null;
+      final list = (res.data['chapters'] as List?) ?? [];
+      return list
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
+    } catch (_) {
+      return null;
     }
   }
 

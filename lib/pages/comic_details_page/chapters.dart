@@ -484,3 +484,393 @@ void _showNasChapterMenu(
     ),
   );
 }
+
+
+/// 单章漫画的 NAS 缓存信息条。
+///
+/// 为什么需要它：绅士漫画这类源如果只有一章，会**不返回章节列表**、
+/// 只给预览图。此时 `_ComicChapters` 整个不渲染，
+/// "这一章在 NAS 上有没有缓存"就没有任何地方可以展示
+/// （章节卡片上的云图标不存在了）。
+///
+/// 这里用一条横向信息栏表达同样的信息，并直接给出操作：
+///   - 未缓存：显示「未缓存」+ 下载按钮
+///   - 已缓存：显示「已缓存 N 页」+ 阅读/删除按钮
+class _NasCacheInfoBar extends StatefulWidget {
+  const _NasCacheInfoBar({
+    required this.nasCache,
+    required this.comicId,
+    required this.sourceKey,
+    required this.title,
+  });
+
+  final NasChapterCache? nasCache;
+  final String comicId;
+  final String sourceKey;
+  final String title;
+
+  @override
+  State<_NasCacheInfoBar> createState() => _NasCacheInfoBarState();
+}
+
+class _NasCacheInfoBarState extends State<_NasCacheInfoBar> {
+  NasChapterCache? _cache;
+  bool _busy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _cache = widget.nasCache;
+    _cache?.addListener(_onChanged);
+    // 单章漫画的"章节 id"就是漫画 id（源的 loadEp(comicId, null) 约定）
+    _cache?.load();
+  }
+
+  @override
+  void dispose() {
+    _cache?.removeListener(_onChanged);
+    super.dispose();
+  }
+
+  void _onChanged() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cache = _cache;
+    if (cache == null || !cache.isAvailable) {
+      return const SliverPadding(padding: EdgeInsets.zero);
+    }
+
+    // 单章场景：用漫画 id 作为章节 key 查询
+    final chapterId = widget.comicId;
+    final cached = cache.cachedChapters.contains(chapterId);
+    final requesting = cache.isRequesting(chapterId);
+
+    return SliverToBoxAdapter(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            color: cached
+                ? context.colorScheme.primaryContainer.withValues(alpha: 0.4)
+                : context.colorScheme.surfaceContainerHigh,
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                cached ? Icons.cloud_done : Icons.cloud_queue,
+                size: 18,
+                color: cached
+                    ? context.colorScheme.primary
+                    : context.colorScheme.outline,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  cached ? "Cached on NAS".tl : "Not cached on NAS".tl,
+                  style: const TextStyle(fontSize: 13),
+                ),
+              ),
+              if (requesting)
+                const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              else if (!cached)
+                TextButton(
+                  onPressed: _busy ? null : () => _download(chapterId),
+                  child: Text("Download to NAS".tl),
+                )
+              else ...[
+                TextButton(
+                  onPressed: _busy ? null : () => _download(chapterId, force: true),
+                  child: Text("Re-download".tl),
+                ),
+                TextButton(
+                  onPressed: _busy ? null : () => _delete(chapterId),
+                  child: Text("Delete from NAS".tl),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _download(String chapterId, {bool force = false}) async {
+    final cache = _cache;
+    if (cache == null) return;
+    setState(() => _busy = true);
+    final ok = await cache.requestDownload(chapters: [chapterId]);
+    if (!mounted) return;
+    setState(() => _busy = false);
+    context.showMessage(
+      message: ok
+          ? "Queued download to NAS".tl
+          : "Failed to request NAS download".tl,
+    );
+  }
+
+  Future<void> _delete(String chapterId) async {
+    final cache = _cache;
+    if (cache == null) return;
+    setState(() => _busy = true);
+    final ok = await cache.deleteChapter(chapterId);
+    if (!mounted) return;
+    setState(() => _busy = false);
+    context.showMessage(
+      message: ok ? "Deleted from NAS".tl : "Failed to delete from NAS".tl,
+    );
+  }
+}
+
+
+/// NAS 存储管理面板：列出这本漫画在 NAS 上缓存的全部章节。
+///
+/// 交互设计：
+///   - 顶部汇总（章节数 / 总大小），让用户一眼知道占了多少空间；
+///   - 每章一行，带页数和删除按钮；
+///   - 底部提供"删除全部"，对应"这本书我不看了，清掉"。
+///
+/// 删除是不可逆的（服务端会删磁盘文件），因此"删除全部"要求二次确认，
+/// 单章删除不确认（误删可以重新下载，且操作成本低）。
+class _NasStoragePanel extends StatefulWidget {
+  const _NasStoragePanel({
+    required this.cache,
+    required this.comicTitle,
+    required this.comicId,
+    required this.sourceKey,
+  });
+
+  final NasChapterCache cache;
+  final String comicTitle;
+  final String comicId;
+  final String sourceKey;
+
+  @override
+  State<_NasStoragePanel> createState() => _NasStoragePanelState();
+}
+
+class _NasStoragePanelState extends State<_NasStoragePanel> {
+  /// 章节详情（id → 页数/大小），从服务端拉一次
+  List<Map<String, dynamic>>? _chapters;
+  bool _loading = true;
+  String? _error;
+  final Set<String> _deleting = {};
+
+  @override
+  void initState() {
+    super.initState();
+    _loadChapters();
+  }
+
+  Future<void> _loadChapters() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    final list = await NasClient.instance.comicChapters(
+      sourceKey: widget.sourceKey,
+      comicId: widget.comicId,
+    );
+    if (!mounted) return;
+    setState(() {
+      _chapters = list;
+      _loading = false;
+      if (list == null) {
+        _error = "NAS is unreachable. Check the connection.".tl;
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.cloud_outlined, size: 20),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    "NAS Storage".tl,
+                    style: const TextStyle(
+                        fontSize: 16, fontWeight: FontWeight.w600),
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.refresh, size: 20),
+                  onPressed: _loadChapters,
+                ),
+              ],
+            ),
+            Text(
+              widget.comicTitle,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 12,
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(height: 12),
+            if (_loading)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 32),
+                child: Center(child: CircularProgressIndicator()),
+              )
+            else if (_error != null)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 24),
+                child: Center(child: Text(_error!)),
+              )
+            else if ((_chapters ?? []).isEmpty)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 24),
+                child: Center(child: Text("Not cached on NAS".tl)),
+              )
+            else ...[
+              _buildSummary(theme),
+              const Divider(),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 340),
+                child: ListView.separated(
+                  shrinkWrap: true,
+                  itemCount: _chapters!.length,
+                  separatorBuilder: (_, __) => const Divider(height: 1),
+                  itemBuilder: (context, i) => _buildRow(_chapters![i]),
+                ),
+              ),
+              const SizedBox(height: 8),
+              TextButton.icon(
+                icon: const Icon(Icons.delete_sweep_outlined, size: 18),
+                label: Text("Delete all cached chapters of this comic".tl),
+                onPressed: _deleteAll,
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSummary(ThemeData theme) {
+    final chapters = _chapters ?? [];
+    var bytes = 0;
+    var pages = 0;
+    for (final c in chapters) {
+      bytes += (c['bytes'] as num?)?.toInt() ?? 0;
+      pages += (c['pages'] as num?)?.toInt() ?? 0;
+    }
+    return Row(
+      children: [
+        Text(
+          "${chapters.length} ${"Chapters".tl} · $pages ${"Pages".tl} · "
+          "${_fmtBytes(bytes)}",
+          style: TextStyle(
+            fontSize: 12,
+            color: theme.colorScheme.onSurfaceVariant,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildRow(Map<String, dynamic> ch) {
+    final id = ch['chapterId']?.toString() ?? '';
+    final title = ch['title']?.toString() ?? id;
+    final pages = (ch['pages'] as num?)?.toInt() ?? 0;
+    final bytes = (ch['bytes'] as num?)?.toInt() ?? 0;
+    final deleting = _deleting.contains(id);
+
+    return ListTile(
+      dense: true,
+      contentPadding: EdgeInsets.zero,
+      title: Text(
+        title.isEmpty ? id : title,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: const TextStyle(fontSize: 13),
+      ),
+      subtitle: Text(
+        '$pages ${"Pages".tl} · ${_fmtBytes(bytes)}',
+        style: const TextStyle(fontSize: 11),
+      ),
+      trailing: deleting
+          ? const SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          : IconButton(
+              icon: const Icon(Icons.delete_outline, size: 20),
+              onPressed: () => _deleteOne(id),
+            ),
+    );
+  }
+
+  Future<void> _deleteOne(String chapterId) async {
+    setState(() => _deleting.add(chapterId));
+    final ok = await widget.cache.deleteChapter(chapterId);
+    if (!mounted) return;
+    setState(() => _deleting.remove(chapterId));
+    if (ok) {
+      await _loadChapters();
+    } else if (mounted) {
+      context.showMessage(message: "Failed to delete from NAS".tl);
+    }
+  }
+
+  Future<void> _deleteAll() async {
+    // showConfirmDialog 是回调式（不是返回 bool），这里用 Completer 桥接
+    final completer = Completer<bool>();
+    showConfirmDialog(
+      context: context,
+      title: "Delete all cached chapters of this comic".tl,
+      content: widget.comicTitle,
+      onConfirm: () {
+        if (!completer.isCompleted) completer.complete(true);
+      },
+      btnColor: Theme.of(context).colorScheme.error,
+    ).then((_) {
+      if (!completer.isCompleted) completer.complete(false);
+    });
+
+    final ok = await completer.future;
+    if (!ok || !mounted) return;
+
+    final done = await widget.cache.deleteComic();
+    if (!mounted) return;
+    context.showMessage(
+      message: done ? "Deleted from NAS".tl : "Failed to delete from NAS".tl,
+    );
+    if (done) {
+      NasChapterCache.invalidate(widget.sourceKey, widget.comicId);
+      await _loadChapters();
+    }
+  }
+
+  static String _fmtBytes(int b) {
+    if (b <= 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    double v = b.toDouble();
+    int i = 0;
+    while (v >= 1024 && i < units.length - 1) {
+      v /= 1024;
+      i++;
+    }
+    return '${v.toStringAsFixed(v >= 100 || i == 0 ? 0 : 1)}${units[i]}';
+  }
+}

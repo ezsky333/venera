@@ -150,6 +150,8 @@ abstract class ImageDownloader {
           {};
     }
     var retryLimit = 5;
+    // 每次加载最多尝试一次 NAS 封面，避免失败时反复请求
+    var triedNasFallback = false;
     while (true) {
       try {
         configs['headers'] ??= {
@@ -226,6 +228,35 @@ abstract class ImageDownloader {
         );
         return;
       } catch (e) {
+        // ---- 降级到 NAS ----
+        //
+        // 源站图片拉不到（超时/被墙/该图已被删）时，只要 NAS 上存过这本
+        // 漫画的封面，就用 NAS 那份顶上。
+        //
+        // 触发点刻意放在"重试也失败"之后：正常网络下用户看到的是源站
+        // 原图（分辨率通常更高），只有真的拿不到才换成 NAS 缓存。
+        //
+        // 只对**封面**生效（eid 为空）：阅读器内页已经有独立的 NAS 优先
+        // 逻辑，在这里再插一层会让两套机制互相干扰。
+        if (!triedNasFallback &&
+            eid.isEmpty &&
+            sourceKey != null &&
+            !NasClient.isNasUrl(imageKey) &&
+            NasClient.instance.isEnabled) {
+          triedNasFallback = true;
+          final nasBytes = await _tryNasCover(sourceKey, cid);
+          if (nasBytes != null) {
+            // 缓存到本地，下次直接命中，不再走源站
+            await CacheManager().writeCache(cacheKey, nasBytes);
+            yield ImageDownloadProgress(
+              currentBytes: nasBytes.length,
+              totalBytes: nasBytes.length,
+              imageBytes: nasBytes,
+            );
+            return;
+          }
+        }
+
         if (retryLimit < 0 || onLoadFailed == null) {
           rethrow;
         }
@@ -242,6 +273,23 @@ abstract class ImageDownloader {
           (configs['onLoadFailed'] as JSInvokable).free();
         }
       }
+    }
+  }
+
+  /// 尝试从 NAS 取这本漫画的封面字节。
+  ///
+  /// 返回 null 表示 NAS 没有（未配置/离线/该书未缓存封面）。
+  /// 用 /api/v1/comic 探测而不是直接猜 media 路径：
+  /// 封面扩展名由落盘时的魔数决定（png/jpg/webp 都有可能），猜不准。
+  static Future<Uint8List?> _tryNasCover(String sourceKey, String cid) async {
+    try {
+      final bytes = await NasClient.instance.fetchNasImage(
+        sourceKey: sourceKey,
+        comicId: cid,
+      );
+      return bytes;
+    } catch (_) {
+      return null;
     }
   }
 }

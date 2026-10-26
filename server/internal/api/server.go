@@ -101,6 +101,7 @@ func (s *Server) Handler() http.Handler {
 	api.HandleFunc("DELETE /api/v1/library/{source}/{comicID}/{chapterID}", s.handleDeleteChapter)
 
 	api.HandleFunc("GET /api/v1/chapter", s.handleChapter)
+	api.HandleFunc("GET /api/v1/comic", s.handleComicFallback)
 	api.HandleFunc("GET /api/v1/media/{path...}", s.handleMedia)
 
 	api.HandleFunc("POST /api/v1/download", s.handleDownload)
