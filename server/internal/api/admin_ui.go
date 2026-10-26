@@ -328,7 +328,7 @@ async function showComic(it) {
         (c.pages === 0
           ? el('span', {class:'badge warn'}, '空 ')
           : el('a', {href:'#', onclick: (e) => { e.preventDefault(); previewChapter(it, c); }},
-             c.title || c.chapterId)))),
+             c.title || c.chapterId))),
       el('td', null, String(c.pages)),
       el('td', null, fmtBytes(c.bytes)),
       el('td', {class:'muted'}, fmtTime(c.createdAt)),
