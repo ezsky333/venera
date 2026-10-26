@@ -155,6 +155,11 @@ func (s *Syncer) apply(clientID string, op PushOp, lamport int64) (bool, string,
 			Folder: payload.Folder, Author: payload.Author,
 			AddedAt: time.Now(), SourceType: sourceType,
 		}
+		// 顺序必须原样带过来：客户端列表按 display_order 升序展示，
+		// 缺这个值时接收端会按"新条目插到开头"处理，整批顺序被颠倒。
+		if payload.Order != nil {
+			fav.DisplayOrder = *payload.Order
+		}
 		changed, err := s.st.AddFavorite(fav, lamport)
 		if err != nil {
 			return false, "", nil, err

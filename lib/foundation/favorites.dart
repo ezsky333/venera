@@ -398,6 +398,24 @@ class LocalFavoritesManager with ChangeNotifier {
     """).first["c"];
   }
 
+  /// 读取某个收藏夹里每条收藏的 display_order（id → order）。
+  ///
+  /// 用于跨设备同步：客户端列表的排列完全由 display_order 决定，
+  /// 不同步它会导致接收端的顺序与源设备不一致（实测整批被颠倒）。
+  Map<String, int> displayOrders(String folder) {
+    if (!existsFolder(folder)) return {};
+    final out = <String, int>{};
+    final rows = _db.select("""
+      select id, display_order from "$folder";
+    """);
+    for (final r in rows) {
+      final id = r["id"]?.toString() ?? '';
+      if (id.isEmpty) continue;
+      out[id] = (r["display_order"] as int?) ?? 0;
+    }
+    return out;
+  }
+
   List<String> get folderNames => _getFolderNamesWithDB();
 
   int maxValue(String folder) {

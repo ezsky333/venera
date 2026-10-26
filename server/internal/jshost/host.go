@@ -196,15 +196,35 @@ func (h *Host) post(fn func()) {
 }
 
 // RunLoop 在调用方 goroutine 上驱动事件循环，直到 Close。
+//
+// 每个事件回调都包了 recover：goja 内部在少数异步路径上会 panic
+// （实测：promise 反应作业里 popTryFrame 出现 slice bounds out of range），
+// 这类 panic 若任其冒泡会**杀死整个服务端进程**——
+// 一个源脚本的边界情况不该让 NAS 下线。
+//
+// 恢复后继续跑同一个事件循环：该 Host 的 JS 状态可能已经不一致，
+// 但调用方会在本次调用超时/失败后丢弃这个 Host（withHost 每次都新建），
+// 因此不会污染后续请求。
 func (h *Host) RunLoop() {
 	for {
 		select {
 		case <-h.ctx.Done():
 			return
 		case fn := <-h.events:
-			fn()
+			h.safeRun(fn)
 		}
 	}
+}
+
+// safeRun 执行一个事件回调并吞掉 panic。
+func (h *Host) safeRun(fn func()) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			h.logf("error", "RunLoop",
+				fmt.Sprintf("recovered from panic in JS event: %v", rec))
+		}
+	}()
+	fn()
 }
 
 // Close 释放资源。
@@ -528,11 +548,21 @@ func exportToPlain(v any) any {
 
 // Call 在事件循环线程上执行一个返回 Promise 的源方法，并等待其完成。
 // 必须在 RunLoop 所在的 goroutine 上调用。
-func (h *Host) Call(expr string) (goja.Value, error) {
+func (h *Host) Call(expr string) (v goja.Value, err error) {
+	// goja 内部在少数路径上会 panic（例如 promise 反应作业里的
+	// popTryFrame 越界）。这类 panic 绝不能冒泡到 main：
+	// 一个源脚本的边界情况会让整个 NAS 进程挂掉。
+	defer func() {
+		if rec := recover(); rec != nil {
+			v = nil
+			err = fmt.Errorf("js panic: %v", rec)
+		}
+	}()
+
 	timeout := h.opts.Timeout
 	deadline := time.Now().Add(timeout)
 
-	v, err := h.vm.RunString(expr)
+	v, err = h.vm.RunString(expr)
 	if err != nil {
 		return nil, err
 	}
@@ -548,7 +578,7 @@ func (h *Host) Call(expr string) (goja.Value, error) {
 		}
 		select {
 		case fn := <-h.events:
-			fn()
+			h.safeRun(fn)
 		case <-h.ctx.Done():
 			return nil, fmt.Errorf("host closed")
 		case <-time.After(20 * time.Millisecond):

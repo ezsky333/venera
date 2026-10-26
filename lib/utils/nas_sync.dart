@@ -57,10 +57,13 @@ class NasSync with ChangeNotifier {
   /// 避免用户连续收藏时产生大量小请求。
   void onFavoriteAdded(FavoriteItem item) {
     if (!isEnabled) return;
+    final folder = _folderOf(item) ?? 'Favorites';
+    // 带上显示顺序，让其他设备落库后排列一致
+    final order = LocalFavoritesManager().displayOrders(folder)[item.id];
     _pendingOps.add({
       'type': 'fav.add',
       'payload': {
-        'folder': _folderOf(item) ?? 'Favorites',
+        'folder': folder,
         'source': item.sourceKey,
         'comicId': item.id,
         'title': item.name,
@@ -68,6 +71,7 @@ class NasSync with ChangeNotifier {
         'cover': item.coverPath,
         'tags': item.tags,
         'sourceType': item.type.value,
+        if (order != null) 'order': order,
         // 上报权威的 hashCode，服务端据此建立长期映射，避免依赖算法
         'sourceTypeHint': item.type.value,
       },
@@ -316,6 +320,10 @@ class NasSync with ChangeNotifier {
       final folders = LocalFavoritesManager().folderNames;
       for (final folder in folders) {
         final comics = LocalFavoritesManager().getFolderComics(folder);
+        // 顺序必须一起传：客户端列表按 display_order 升序展示，
+        // 接收端如果拿不到这个值，会按"新条目插到开头"处理，
+        // 结果整批收藏的顺序被完全颠倒（实测现象）。
+        final orders = LocalFavoritesManager().displayOrders(folder);
         for (final item in comics) {
           ops.add({
             'type': 'fav.add',
@@ -328,6 +336,7 @@ class NasSync with ChangeNotifier {
               'cover': item.coverPath,
               'tags': item.tags,
               'sourceType': item.type.value,
+              if (orders[item.id] != null) 'order': orders[item.id],
             },
           });
         }
@@ -676,7 +685,18 @@ class NasSync with ChangeNotifier {
             : ComicType(sourceKey.hashCode),
         tags: tags,
       );
-      LocalFavoritesManager().addComic(folder, item, null, null);
+      // 用远端给的 display_order 落库，保持与源设备一致的排列。
+      //
+      // 传 null 会让 addComic 走"插到开头"（minValue-1）的默认分支：
+      // 逐条应用时每一条都跑到最前面，最终整批顺序被完全颠倒——
+      // 这正是"pad 上收藏顺序和手机反着"的原因。
+      final order = (p['order'] ?? p['displayOrder']) as num?;
+      LocalFavoritesManager().addComic(
+        folder,
+        item,
+        order?.toInt(),
+        null,
+      );
       return true;
     } catch (e, st) {
       // 记录**第一条**失败的具体原因：449 条全部失败时，

@@ -44,6 +44,13 @@ type Favorite struct {
 	AddedAt time.Time `json:"addedAt"`
 	// SourceType 是 App 中使用的 sourceKey.hashCode，用于与 history/comics 表对齐。
 	SourceType int32 `json:"sourceType"`
+	// DisplayOrder 是收藏夹内的显示顺序（客户端的 display_order）。
+	//
+	// 客户端列表的排列完全由它决定，与 addedAt 无关：
+	// 新收藏默认插到开头（minValue-1），所以编号越小越靠前。
+	// 不同步这个值会导致接收端的顺序与源设备完全不一致
+	// （实测：整批收藏被完全颠倒）。
+	DisplayOrder int `json:"displayOrder"`
 }
 
 // History 是一条阅读进度。
@@ -143,6 +150,12 @@ type FavoriteOpPayload struct {
 	Cover      string   `json:"cover,omitempty"`
 	Tags       []string `json:"tags,omitempty"`
 	SourceType int32    `json:"sourceType,omitempty"`
+	// Order 是客户端收藏夹内的显示顺序（display_order）。
+	//
+	// 必须同步：客户端列表的排列完全由这个值决定，与 added_at 无关。
+	// 早期实现没传它，接收端每条都按"插到开头"处理，
+	// 结果整批收藏的顺序被完全颠倒。
+	Order *int `json:"order,omitempty"`
 }
 
 // FavoriteMovePayload 是收藏夹间移动的载荷。

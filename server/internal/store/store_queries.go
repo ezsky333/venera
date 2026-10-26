@@ -53,18 +53,20 @@ func (s *Store) GetComic(source, comicID string) (*model.Comic, error) {
 func (s *Store) AddFavorite(f model.Favorite, lamport int64) (bool, error) {
 	tags, _ := json.Marshal(f.Tags)
 	res, err := s.db.Exec(
-		`INSERT INTO favorites(folder, source, comic_id, title, author, cover, tags, source_type, added_at, lamport)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO favorites(folder, source, comic_id, title, author, cover, tags,
+		    source_type, added_at, display_order, lamport)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(folder, source, comic_id) DO UPDATE SET
 		   title = COALESCE(NULLIF(excluded.title,''), favorites.title),
 		   author = COALESCE(NULLIF(excluded.author,''), favorites.author),
 		   cover = COALESCE(NULLIF(excluded.cover,''), favorites.cover),
 		   tags = COALESCE(NULLIF(excluded.tags,'[]'), favorites.tags),
 		   source_type = excluded.source_type,
+		   display_order = excluded.display_order,
 		   lamport = excluded.lamport
 		 WHERE excluded.lamport >= favorites.lamport`,
 		f.Folder, f.Source, f.ID, f.Title, f.Author, f.Cover, string(tags), f.SourceType,
-		f.AddedAt.UnixMilli(), lamport,
+		f.AddedAt.UnixMilli(), f.DisplayOrder, lamport,
 	)
 	if err != nil {
 		return false, err
@@ -134,14 +136,18 @@ func (s *Store) ListFavorites(folder string, limit, offset int) ([]model.Favorit
 	if limit <= 0 || limit > 1000 {
 		limit = 200
 	}
-	q := `SELECT folder, source, comic_id, title, author, cover, tags, source_type, added_at
+	// 排序必须与客户端一致：客户端按 display_order 升序展示
+	// （新收藏插到开头 = 更小的值）。用 added_at 排是错的，
+	// 那个字段只反映"同步到服务端的时间"，不代表用户看到的顺序。
+	q := `SELECT folder, source, comic_id, title, author, cover, tags,
+	             source_type, added_at, display_order
 	      FROM favorites`
 	var args []any
 	if folder != "" {
 		q += ` WHERE folder = ?`
 		args = append(args, folder)
 	}
-	q += ` ORDER BY added_at DESC LIMIT ? OFFSET ?`
+	q += ` ORDER BY display_order ASC, added_at DESC LIMIT ? OFFSET ?`
 	args = append(args, limit, offset)
 
 	rows, err := s.db.Query(q, args...)
@@ -154,7 +160,8 @@ func (s *Store) ListFavorites(folder string, limit, offset int) ([]model.Favorit
 		var f model.Favorite
 		var tags sql.NullString
 		var added int64
-		if err := rows.Scan(&f.Folder, &f.Source, &f.ID, &f.Title, &f.Author, &f.Cover, &tags, &f.SourceType, &added); err != nil {
+		if err := rows.Scan(&f.Folder, &f.Source, &f.ID, &f.Title, &f.Author,
+			&f.Cover, &tags, &f.SourceType, &added, &f.DisplayOrder); err != nil {
 			return nil, err
 		}
 		f.AddedAt = time.UnixMilli(added)
@@ -169,8 +176,10 @@ func (s *Store) ListFavorites(folder string, limit, offset int) ([]model.Favorit
 // AllFavoriteComics 返回去重后的收藏漫画（用于批量排队下载）。
 func (s *Store) AllFavoriteComics() ([]model.Favorite, error) {
 	rows, err := s.db.Query(`
-		SELECT MIN(folder), source, comic_id, MAX(title), MAX(author), MAX(cover), MAX(tags), MAX(source_type), MIN(added_at)
-		FROM favorites GROUP BY source, comic_id ORDER BY MIN(added_at) DESC`)
+		SELECT folder, source, comic_id, title, author, cover, tags,
+		       source_type, added_at, display_order
+		FROM favorites
+		ORDER BY folder, display_order ASC, added_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -180,7 +189,8 @@ func (s *Store) AllFavoriteComics() ([]model.Favorite, error) {
 		var f model.Favorite
 		var tags sql.NullString
 		var added int64
-		if err := rows.Scan(&f.Folder, &f.Source, &f.ID, &f.Title, &f.Author, &f.Cover, &tags, &f.SourceType, &added); err != nil {
+		if err := rows.Scan(&f.Folder, &f.Source, &f.ID, &f.Title, &f.Author,
+			&f.Cover, &tags, &f.SourceType, &added, &f.DisplayOrder); err != nil {
 			return nil, err
 		}
 		f.AddedAt = time.UnixMilli(added)

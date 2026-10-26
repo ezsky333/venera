@@ -118,6 +118,7 @@ func (s *Store) migrate() error {
 			tags        TEXT,
 			source_type INTEGER,
 			added_at    INTEGER,
+			display_order INTEGER DEFAULT 0,
 			lamport     INTEGER DEFAULT 0,
 			PRIMARY KEY (folder, source, comic_id)
 		)`,
@@ -196,6 +197,10 @@ func (s *Store) migrate() error {
 	}
 	// 增量列：CREATE TABLE IF NOT EXISTS 不会给已存在的表补列。
 	if err := s.ensureColumn("jobs", "attempts", "INTEGER DEFAULT 0"); err != nil {
+		return err
+	}
+	// display_order 用于跨设备保持收藏顺序（客户端列表按它排序）
+	if err := s.ensureColumn("favorites", "display_order", "INTEGER DEFAULT 0"); err != nil {
 		return err
 	}
 	return nil
