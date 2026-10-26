@@ -39,6 +39,13 @@ class _ReaderImagesState extends State<_ReaderImages> {
     if (inProgress) return;
     inProgress = true;
 
+    // ---- 离线 NAS 模式：源站视为不可用 ----
+    //
+    // 开关打开且 NAS 可达时，源站请求必然超时。原来的顺序是
+    // "NAS 没缓存 → 回去问源站"，在飞机上就是转圈到天荒地老。
+    // 这里改成：NAS 没缓存就**直接报错**，把"这一章没下过"如实告诉用户。
+    final offlineOnly = NasOfflineMode.instance.preferNasOnly;
+
     // ---- NAS 优先（新增）----
     // 优先级：本地已下载 > NAS 缓存 > 源网络加载
     //
@@ -48,6 +55,15 @@ class _ReaderImagesState extends State<_ReaderImages> {
       var viaNas = await _tryLoadFromNas();
       if (viaNas) {
         _notifyLoadedFromNas();
+        context.readerScaffold.update();
+        return;
+      }
+      if (offlineOnly) {
+        setState(() {
+          error = "This chapter is not cached on NAS.".tl;
+          reader.isLoading = false;
+          inProgress = false;
+        });
         context.readerScaffold.update();
         return;
       }

@@ -483,8 +483,8 @@
     "Already cached on NAS": "NAS 上已缓存",
     "Failed to queue NAS download": "加入 NAS 下载队列失败",
     "NAS download complete": "NAS 下载完成",
-    "NAS is not configured. Set it up in Settings.": "尚未配置 NAS，请先在设置中完成",
-    "NAS is unreachable. Check the connection.": "无法连接 NAS，请检查网络",
+    "NAS is not configured. Set it up in Settings.": "尚未配置 NAS，请先到设置里填写。",
+    "NAS is unreachable. Check the connection.": "连不上 NAS，请检查网络连接。",
     "The comic is downloaded": "该漫画已下载",
     "The comic is downloading": "该漫画正在下载",
     "Normal": "普通",
@@ -499,7 +499,10 @@
     "No new sources from NAS": "NAS 上没有新的漫画源",
     "Bearer token configured on the server": "服务端配置的访问令牌",
     "Not cached on NAS": "NAS 未缓存",
-    "Re-download": "重新下载"
+    "Re-download": "重新下载",
+    "Offline NAS Mode": "离线 NAS 模式",
+    "Covers, details and pages come from NAS": "封面、详情与图片优先从 NAS 取",
+    "This chapter is not cached on NAS.": "这一章没有缓存在 NAS 上。"
   },
   "zh_TW": {
     "Home": "首頁",
@@ -985,8 +988,8 @@
     "Already cached on NAS": "NAS 上已快取",
     "Failed to queue NAS download": "加入 NAS 下載佇列失敗",
     "NAS download complete": "NAS 下載完成",
-    "NAS is not configured. Set it up in Settings.": "尚未設定 NAS，請先在設定中完成",
-    "NAS is unreachable. Check the connection.": "無法連線 NAS，請檢查網路",
+    "NAS is not configured. Set it up in Settings.": "尚未設定 NAS，請先到設定裡填寫。",
+    "NAS is unreachable. Check the connection.": "連不上 NAS，請檢查網路連線。",
     "The comic is downloaded": "該漫畫已下載",
     "The comic is downloading": "該漫畫正在下載",
     "Normal": "一般",
@@ -1001,6 +1004,9 @@
     "No new sources from NAS": "NAS 上沒有新的漫畫源",
     "Bearer token configured on the server": "伺服器設定的存取權杖",
     "Not cached on NAS": "NAS 未快取",
-    "Re-download": "重新下載"
+    "Re-download": "重新下載",
+    "Offline NAS Mode": "離線 NAS 模式",
+    "Covers, details and pages come from NAS": "封面、詳情與圖片優先從 NAS 取",
+    "This chapter is not cached on NAS.": "這一章沒有快取在 NAS 上。"
   }
 }

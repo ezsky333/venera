@@ -11,6 +11,7 @@ import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/js_engine.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/nas_client.dart';
+import 'package:venera/foundation/nas_offline_mode.dart';
 import 'package:venera/network/cookie_jar.dart';
 import 'package:venera/pages/comic_source_page.dart';
 import 'package:venera/pages/follow_updates_page.dart';
@@ -69,6 +70,7 @@ Future<void> init() async {
   // NAS 服务端：载入配置并在后台做一次增量同步。
   // 失败不影响启动（网络未就绪时很常见），下次操作会重试。
   NasClient.instance.load();
+  NasOfflineMode.instance.load();
   if (NasClient.instance.isEnabled) {
     Future.microtask(() async {
       try {

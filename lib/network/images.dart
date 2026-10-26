@@ -6,6 +6,7 @@ import 'package:venera/foundation/cache_manager.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/consts.dart';
 import 'package:venera/foundation/nas_client.dart';
+import 'package:venera/foundation/nas_offline_mode.dart';
 import 'package:venera/utils/image.dart';
 
 import 'app_dio.dart';
@@ -137,6 +138,30 @@ abstract class ImageDownloader {
     }
 
     Future<Map<String, dynamic>?> Function()? onLoadFailed;
+
+    // ---- 离线 NAS 模式：封面直接吃 NAS ----
+    //
+    // 开关打开时源站基本不可用，等 5 次重试全失败再降级是纯粹的浪费：
+    // 列表页会先空一片、再逐个补图。这里直接抢先取 NAS 那份。
+    //
+    // 只处理封面（eid 为空）：内页由阅读器自己的 NAS 优先逻辑负责，
+    // 在这里插一层会让两套机制打架。
+    if (eid.isEmpty &&
+        sourceKey != null &&
+        !NasClient.isNasUrl(imageKey) &&
+        NasOfflineMode.instance.preferNasCover) {
+      final nasBytes = await _tryNasCover(sourceKey, cid);
+      if (nasBytes != null) {
+        await CacheManager().writeCache(cacheKey, nasBytes);
+        yield ImageDownloadProgress(
+          currentBytes: nasBytes.length,
+          totalBytes: nasBytes.length,
+          imageBytes: nasBytes,
+        );
+        return;
+      }
+      // NAS 也没这本封面 → 落到下面走原流程（也许源站其实是通的）
+    }
 
     var configs = <String, dynamic>{};
     // NAS 返回的图片 URL 已经是可直取的绝对地址（自带 token），

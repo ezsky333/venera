@@ -5,6 +5,7 @@ class _ComicChapters extends StatelessWidget {
     this.history,
     required this.groupedMode,
     this.nasCache,
+    this.nasUncached,
   });
 
   final History? history;
@@ -14,11 +15,17 @@ class _ComicChapters extends StatelessWidget {
   /// NAS 章节缓存状态；为空表示未启用 NAS 或尚未就绪。
   final NasChapterCache? nasCache;
 
+  /// 明确**未缓存**的章节 id（仅在 NAS 兜底渲染时非空）。
+  ///
+  /// 兜底详情页返回的是源端全量章节表，其中大部分并没有下载到 NAS。
+  /// 这些章节要灰掉：点了也是"这一章没有缓存在 NAS 上"，不如提前说明。
+  final Set<String>? nasUncached;
+
   @override
   Widget build(BuildContext context) {
     return groupedMode
-        ? _GroupedComicChapters(history, nasCache)
-        : _NormalComicChapters(history, nasCache);
+        ? _GroupedComicChapters(history, nasCache, nasUncached)
+        : _NormalComicChapters(history, nasCache, nasUncached);
   }
 }
 
@@ -55,11 +62,13 @@ class _NasBadge extends StatelessWidget {
 }
 
 class _NormalComicChapters extends StatefulWidget {
-  const _NormalComicChapters(this.history, this.nasCache);
+  const _NormalComicChapters(this.history, this.nasCache, this.nasUncached);
 
   final History? history;
 
   final NasChapterCache? nasCache;
+
+  final Set<String>? nasUncached;
 
   @override
   State<_NormalComicChapters> createState() => _NormalComicChaptersState();
@@ -149,6 +158,9 @@ class _NormalComicChaptersState extends State<_NormalComicChapters> {
                   final nas = widget.nasCache;
                   final cached = nas?.cachedChapters.contains(key) ?? false;
                   final requesting = nas?.isRequesting(key) ?? false;
+                  // 兜底渲染时，明确未缓存的章节要灰掉
+                  final uncached =
+                      widget.nasUncached?.contains(key) ?? false;
                   return Padding(
                     padding: const EdgeInsets.fromLTRB(4, 4, 4, 4),
                     child: Material(
@@ -174,9 +186,12 @@ class _NormalComicChaptersState extends State<_NormalComicChapters> {
                                   textAlign: TextAlign.center,
                                   overflow: TextOverflow.ellipsis,
                                   style: TextStyle(
-                                    color: visited
+                                    color: uncached
                                         ? context.colorScheme.outline
-                                        : null,
+                                            .withValues(alpha: 0.6)
+                                        : (visited
+                                            ? context.colorScheme.outline
+                                            : null),
                                   ),
                                 ),
                               ),
@@ -220,11 +235,14 @@ class _NormalComicChaptersState extends State<_NormalComicChapters> {
 }
 
 class _GroupedComicChapters extends StatefulWidget {
-  const _GroupedComicChapters(this.history, this.nasCache);
+  const _GroupedComicChapters(
+      this.history, this.nasCache, this.nasUncached);
 
   final History? history;
 
   final NasChapterCache? nasCache;
+
+  final Set<String>? nasUncached;
 
   @override
   State<_GroupedComicChapters> createState() => _GroupedComicChaptersState();
@@ -361,6 +379,8 @@ class _GroupedComicChaptersState extends State<_GroupedComicChapters>
                   final nas = widget.nasCache;
                   final cached = nas?.cachedChapters.contains(key) ?? false;
                   final requesting = nas?.isRequesting(key) ?? false;
+                  final uncached =
+                      widget.nasUncached?.contains(key) ?? false;
                   return Padding(
                     padding: const EdgeInsets.fromLTRB(4, 4, 4, 4),
                     child: Material(
@@ -386,9 +406,12 @@ class _GroupedComicChaptersState extends State<_GroupedComicChapters>
                                   textAlign: TextAlign.center,
                                   overflow: TextOverflow.ellipsis,
                                   style: TextStyle(
-                                    color: visited
+                                    color: uncached
                                         ? context.colorScheme.outline
-                                        : null,
+                                            .withValues(alpha: 0.6)
+                                        : (visited
+                                            ? context.colorScheme.outline
+                                            : null),
                                   ),
                                 ),
                               ),

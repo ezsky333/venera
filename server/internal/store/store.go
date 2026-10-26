@@ -203,6 +203,18 @@ func (s *Store) migrate() error {
 	if err := s.ensureColumn("favorites", "display_order", "INTEGER DEFAULT 0"); err != nil {
 		return err
 	}
+	// chapter_list 保存**源端完整章节列表**（JSON 数组，按源端顺序）。
+	//
+	// 为什么需要它：离线兜底详情页原本只返回"已缓存的章节"，于是客户端
+	// 拿到的章节表是**被压缩过的**——本地 history.ep=19 指的是源端的第 19 章，
+	// 在压缩表里却指向第 19 个"已缓存"的章节，阅读器就会打开错的那一章
+	// （实测表现：历史显示 E39，详情页显示第 19 章）。
+	//
+	// 有了这一列，兜底时能重建与源端一致的下标，未缓存的章节标记出来
+	// 交给客户端灰掉，索引关系就永远对得上了。
+	if err := s.ensureColumn("comics", "chapter_list", "TEXT"); err != nil {
+		return err
+	}
 	return nil
 }
 

@@ -270,16 +270,48 @@ func (s *Server) handleComicFallback(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(chapters) > 0 {
 		out["cached"] = true
-		// 转成客户端阅读器能直接用的形态
+
+		// 已缓存章节的明细（面板与阅读器共用）
+		cachedByID := make(map[string]map[string]any, len(chapters))
 		list := make([]map[string]any, 0, len(chapters))
 		for _, ch := range chapters {
-			list = append(list, map[string]any{
+			item := map[string]any{
 				"id":    ch["chapterId"],
 				"title": ch["title"],
 				"pages": ch["pages"],
-			})
+			}
+			list = append(list, item)
+			if id, ok := ch["chapterId"].(string); ok {
+				cachedByID[id] = item
+			}
 		}
 		out["chapters"] = list
+
+		// ---- 完整章节表（关键）----
+		//
+		// 客户端阅读器用 history.ep 当作**下标**去章节数组里取章节，
+		// 所以返回的数组必须与源端顺序一一对应。只回已缓存的章节会让
+		// 下标整体前移：history 里第 19 章，在压缩表里成了第 19 个
+		// 已缓存章节，打开的就是完全不相干的一话（实测 E39 vs 19）。
+		//
+		// 因此这里优先返回源端全量列表，并把每章是否已缓存显式标出；
+		// 客户端据此渲染灰掉的未缓存章节，下标关系永远成立。
+		if full, err := s.st.GetComicChapterList(srcKey, comicID); err == nil && len(full) > 0 {
+			fullList := make([]map[string]any, 0, len(full))
+			hasCached := make([]bool, 0, len(full))
+			for _, c := range full {
+				_, ok := cachedByID[c.ID]
+				fullList = append(fullList, map[string]any{
+					"id":      c.ID,
+					"title":   c.Title,
+					"group":   c.Group,
+					"cached":  ok,
+				})
+				hasCached = append(hasCached, ok)
+			}
+			out["fullChapters"] = fullList
+			out["cachedFlags"] = hasCached
+		}
 
 		// 封面：优先用磁盘上的实际文件
 		if dir, ok := chapters[0]["dir"].(string); ok && dir != "" {

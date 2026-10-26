@@ -1,9 +1,11 @@
 package store
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/venera-app/venera-nas/internal/model"
@@ -25,6 +27,56 @@ func (s *Store) UpsertComic(c model.Comic, sourceType int32) error {
 		c.Source, c.ID, c.Title, c.Subtitle, c.Cover, string(tags), sourceType, time.Now().UnixMilli(),
 	)
 	return err
+}
+
+// SetComicChapterList 记录源端的完整章节列表（顺序即源端顺序）。
+//
+// 只在拿到非空列表时覆盖：空的章节列表通常代表"源没返回"，
+// 用它去覆盖已有的正确顺序只会把索引搞坏。
+func (s *Store) SetComicChapterList(source, comicID string, list []model.Chapter) error {
+	if len(list) == 0 {
+		return nil
+	}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(list); err != nil {
+		return err
+	}
+	raw := strings.TrimRight(buf.String(), "\n")
+	// 行可能还不存在（只下过章节、没同步过元信息），先占位再写。
+	if _, err := s.db.Exec(
+		`INSERT INTO comics(source, comic_id, chapter_list, updated_at)
+		 VALUES (?, ?, ?, ?)
+		 ON CONFLICT(source, comic_id) DO UPDATE SET chapter_list = excluded.chapter_list`,
+		source, comicID, raw, time.Now().UnixMilli(),
+	); err != nil {
+		return err
+	}
+	return nil
+}
+
+// GetComicChapterList 读取源端完整章节列表。为空表示还没记录过。
+func (s *Store) GetComicChapterList(source, comicID string) ([]model.Chapter, error) {
+	var raw sql.NullString
+	err := s.db.QueryRow(
+		`SELECT chapter_list FROM comics WHERE source = ? AND comic_id = ?`,
+		source, comicID,
+	).Scan(&raw)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !raw.Valid || raw.String == "" {
+		return nil, nil
+	}
+	var out []model.Chapter
+	if err := json.Unmarshal([]byte(raw.String), &out); err != nil {
+		return nil, nil
+	}
+	return out, nil
 }
 
 func (s *Store) GetComic(source, comicID string) (*model.Comic, error) {

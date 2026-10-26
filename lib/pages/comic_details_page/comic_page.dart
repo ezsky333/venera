@@ -20,6 +20,7 @@ import 'package:venera/foundation/local.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/nas_chapter_cache.dart';
 import 'package:venera/foundation/nas_client.dart';
+import 'package:venera/foundation/nas_offline_mode.dart';
 import 'package:venera/foundation/res.dart';
 import 'package:venera/network/download.dart';
 import 'package:venera/network/cache.dart';
@@ -300,6 +301,32 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
     // 因此这里必须**主动加超时**，不能指望源自己报错。
     // 超时时长取 12 秒：足够覆盖正常网络下最慢的详情页，
     // 又不至于让用户对着转圈等到失去耐心。
+    // ---- 离线 NAS 模式：直接跳源站 ----
+    //
+    // 开了离线模式且 NAS 可达时，源站基本可以断定打不开（机场/地铁）。
+    // 此时先去问源站 = 白等 12 秒超时再降级，体验上就是"点了没反应"。
+    // 所以这里把顺序反过来：先试 NAS，NAS 没有才回去试源站。
+    if (NasOfflineMode.instance.preferNasOnly) {
+      final offlineFb = await NasClient.instance.comicFallback(
+        sourceKey: widget.sourceKey,
+        comicId: widget.id,
+      );
+      if (offlineFb != null && !offlineFb.isEmpty) {
+        nasFallback = offlineFb;
+        Log.info(
+          'NAS',
+          'offline mode hit ${widget.sourceKey}/${widget.id}: '
+          '${offlineFb.chapters.length} cached chapters',
+        );
+        return Res(
+          ComicDetails.fromJson(
+            nasFallbackToComicDetailsJson(offlineFb, widget.sourceKey),
+          ),
+        );
+      }
+      // NAS 没这本 → 落到下面的原流程（也许源站其实通）
+    }
+
     Res<ComicDetails> res;
     try {
       res = await comicSource
@@ -808,7 +835,24 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
       history: history,
       groupedMode: comic.chapters!.isGrouped,
       nasCache: nasCache,
+      nasUncached: _nasUncachedIds,
     );
+  }
+
+  /// 兜底渲染时**明确未缓存**的章节 id 集合。
+  ///
+  /// 只有在 NAS 兜底数据带了源端完整章节表时才非空；此时章节数组
+  /// 与源端一一对应，未缓存的那部分必须灰掉——它们点了也读不到。
+  Set<String>? get _nasUncachedIds {
+    final fb = nasFallback;
+    if (fb == null || !fb.hasFullList) return null;
+    final out = <String>{};
+    for (var i = 0; i < fb.chapters.length; i++) {
+      if (i < fb.cachedFlags.length && !fb.cachedFlags[i]) {
+        out.add(fb.chapters[i].id);
+      }
+    }
+    return out.isEmpty ? null : out;
   }
 
   Widget buildThumbnails() {

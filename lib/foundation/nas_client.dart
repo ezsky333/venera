@@ -131,6 +131,15 @@ class NasComicFallback {
   /// 已缓存章节：章节 id / 标题 / 页数。
   final List<NasFallbackChapter> chapters;
 
+  /// 与 [chapters] 一一对应的"是否已缓存"标记。
+  ///
+  /// 只有在服务端返回了**源端全量章节表**时才非空：那时 [chapters]
+  /// 里的未缓存章节也会列出来（保证下标与源端一致），但不能点。
+  final List<bool> cachedFlags;
+
+  /// 是否拥有源端完整章节表（决定渲染时能不能灰掉未缓存章节）。
+  bool get hasFullList => cachedFlags.isNotEmpty;
+
   const NasComicFallback({
     required this.sourceKey,
     required this.comicId,
@@ -139,12 +148,42 @@ class NasComicFallback {
     this.cover = '',
     this.tags = const [],
     this.chapters = const [],
+    this.cachedFlags = const [],
   });
 
   bool get isEmpty => chapters.isEmpty;
 
   static NasComicFallback fromJson(Map<String, dynamic> m) {
     final chs = <NasFallbackChapter>[];
+    final flags = <bool>[];
+
+    // 优先用源端全量章节表：客户端用 history.ep 当**下标**找章节，
+    // 只给已缓存章节会让下标整体前移，打开错误的章节。
+    final full = m['fullChapters'];
+    if (full is List && full.isNotEmpty) {
+      for (final e in full) {
+        if (e is! Map) continue;
+        chs.add(NasFallbackChapter(
+          id: e['id']?.toString() ?? '',
+          title: e['title']?.toString() ?? '',
+          pages: (e['pages'] as num?)?.toInt() ?? 0,
+        ));
+        flags.add(e['cached'] == true);
+      }
+      final tagsRaw = _tagsOf(m);
+      return NasComicFallback(
+        sourceKey: m['source']?.toString() ?? '',
+        comicId: m['comicId']?.toString() ?? '',
+        title: m['title']?.toString() ?? '',
+        subtitle: m['subtitle']?.toString() ?? '',
+        cover: m['cover']?.toString() ?? '',
+        tags: tagsRaw,
+        chapters: chs,
+        cachedFlags: flags,
+      );
+    }
+
+    // 回退：老服务端只给已缓存章节
     final raw = m['chapters'];
     if (raw is List) {
       for (final e in raw) {
@@ -154,14 +193,7 @@ class NasComicFallback {
           title: e['title']?.toString() ?? '',
           pages: (e['pages'] as num?)?.toInt() ?? 0,
         ));
-      }
-    }
-    final tagsRaw = m['tags'];
-    final tags = <String>[];
-    if (tagsRaw is List) {
-      for (final t in tagsRaw) {
-        final s = t?.toString() ?? '';
-        if (s.isNotEmpty) tags.add(s);
+        flags.add(true);
       }
     }
     return NasComicFallback(
@@ -170,9 +202,22 @@ class NasComicFallback {
       title: m['title']?.toString() ?? '',
       subtitle: m['subtitle']?.toString() ?? '',
       cover: m['cover']?.toString() ?? '',
-      tags: tags,
+      tags: _tagsOf(m),
       chapters: chs,
+      cachedFlags: flags,
     );
+  }
+
+  static List<String> _tagsOf(Map<String, dynamic> m) {
+    final tagsRaw = m['tags'];
+    final tags = <String>[];
+    if (tagsRaw is List) {
+      for (final t in tagsRaw) {
+        final s = t?.toString() ?? '';
+        if (s.isNotEmpty) tags.add(s);
+      }
+    }
+    return tags;
   }
 }
 
@@ -193,6 +238,10 @@ class NasFallbackChapter {
 ///
 /// 单独放在这里而不是给 ComicDetails 加构造器：ComicDetails 是源脚本
 /// 契约的一部分（JSON 形状固定），不该为了一个离线兜底而改它的 API。
+///
+/// 注意：未缓存章节的灰化标记不放在返回的 JSON 里——ComicDetails.fromJson
+/// 会丢弃不认识的键。这类 UI 信息由调用方直接从 [NasComicFallback.cachedFlags]
+/// 取（见 _ComicPageState.nasFallback）。
 Map<String, dynamic> nasFallbackToComicDetailsJson(
   NasComicFallback fb,
   String sourceKey,

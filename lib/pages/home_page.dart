@@ -9,6 +9,8 @@ import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/history.dart';
 import 'package:venera/foundation/local.dart';
 import 'package:venera/foundation/log.dart';
+import 'package:venera/foundation/nas_client.dart';
+import 'package:venera/foundation/nas_offline_mode.dart';
 import 'package:venera/pages/comic_details_page/comic_page.dart';
 import 'package:venera/pages/comic_source_page.dart';
 import 'package:venera/pages/downloading_page.dart';
@@ -32,6 +34,7 @@ class HomePage extends StatelessWidget {
       slivers: [
         SliverPadding(padding: EdgeInsets.only(top: context.padding.top)),
         const _SearchBar(),
+        const _NasOfflineBar(),
         const _SyncDataWidget(),
         const _History(),
         const _Local(),
@@ -73,6 +76,135 @@ class _SearchBar extends StatelessWidget {
               ],
             ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 首页的「离线 NAS 模式」开关条。
+///
+/// 位置刻意放在搜索栏正下方——用户切到飞行模式/地铁里时，
+/// 第一眼能看见、一次点击就能打开，不用进设置翻三层。
+///
+/// 只在配置了 NAS 时出现：没配 NAS 的用户看到这个开关只会困惑。
+class _NasOfflineBar extends StatefulWidget {
+  const _NasOfflineBar();
+
+  @override
+  State<_NasOfflineBar> createState() => _NasOfflineBarState();
+}
+
+class _NasOfflineBarState extends State<_NasOfflineBar>
+    with WidgetsBindingObserver {
+  bool _busy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    NasOfflineMode.instance.addListener(_onChange);
+    WidgetsBinding.instance.addObserver(this);
+    if (NasOfflineMode.instance.enabled) {
+      // 恢复一个"上次开着"的开关时，立刻确认 NAS 现在还在不在
+      NasOfflineMode.instance.refreshReachability();
+    }
+  }
+
+  @override
+  void dispose() {
+    NasOfflineMode.instance.removeListener(_onChange);
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  void _onChange() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    // 回到前台时 NAS 可能已经换了网段，重新探一次
+    if (state == AppLifecycleState.resumed) {
+      NasOfflineMode.instance.refreshReachability();
+    }
+  }
+
+  Future<void> _toggle(bool value) async {
+    setState(() => _busy = true);
+    final ok = await NasOfflineMode.instance.toggle(value);
+    if (!mounted) return;
+    setState(() => _busy = false);
+    if (!ok && value) {
+      showDialogMessage(
+        App.rootContext,
+        "Offline NAS Mode".tl,
+        NasClient.instance.isEnabled
+            ? "NAS is unreachable. Check the connection.".tl
+            : "NAS is not configured. Set it up in Settings.".tl,
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!NasClient.instance.isEnabled) {
+      return const SliverPadding(padding: EdgeInsets.zero);
+    }
+    final mode = NasOfflineMode.instance;
+    final on = mode.enabled;
+    // 开关开着但 NAS 掉了 —— 这时候要明确告诉用户"现在其实拿不到东西"
+    final degraded = on && !mode.nasReachable;
+
+    return SliverToBoxAdapter(
+      child: Container(
+        margin: const EdgeInsets.symmetric(horizontal: 8),
+        decoration: BoxDecoration(
+          color: on
+              ? context.colorScheme.primaryContainer.withValues(alpha: 0.4)
+              : null,
+          border: Border.all(
+            color: on
+                ? context.colorScheme.primary.withValues(alpha: 0.6)
+                : context.colorScheme.outlineVariant,
+            width: 0.6,
+          ),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: ListTile(
+          leading: Icon(
+            on ? Icons.cloud_done_outlined : Icons.cloud_queue_outlined,
+            color: on ? context.colorScheme.primary : null,
+          ),
+          title: Row(
+            children: [
+              Text("Offline NAS Mode".tl, style: ts.s16),
+              if (degraded) ...[
+                const SizedBox(width: 8),
+                Icon(
+                  Icons.warning_amber_rounded,
+                  size: 18,
+                  color: context.colorScheme.error,
+                ),
+              ],
+            ],
+          ),
+          subtitle: Text(
+            degraded
+                ? "NAS is offline".tl
+                : "Covers, details and pages come from NAS".tl,
+            style: ts.s12,
+          ),
+          trailing: _busy
+              ? const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : Switch(
+                  value: on,
+                  onChanged: _toggle,
+                ),
         ),
       ),
     );

@@ -116,6 +116,15 @@ func (d *Downloader) RunJob(jobID int64, detail *model.ComicDetail) error {
 		targets = filtered
 	}
 
+	// 把**完整**章节列表落库（不是 targets，是源端全量）。
+	//
+	// 这是离线兜底详情页能正确还原 history.ep 的前提：
+	// 客户端只按"第 N 项"定位章节，若服务端只回已缓存的章节，
+	// 下标就会整体前移，打开的就是错的章节。
+	if err := d.store.SetComicChapterList(detail.Source, detail.ID, detail.Chapters); err != nil {
+		d.logf("save chapter list failed for %s: %v", detail.ID, err)
+	}
+
 	comicDir := comicDirName(detail.Title, detail.ID)
 	baseDir := filepath.Join(d.store.LibraryDir(), comicDir)
 	if err := os.MkdirAll(baseDir, 0o755); err != nil {
