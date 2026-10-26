@@ -470,7 +470,7 @@ let jobSse = null;
 function startJobSse() {
   if (!$('#tab-jobs') || $('#tab-jobs').hidden) return;
   if (jobSse) return; // 已在订阅
-  try { jobSse = new EventSource('/api/v1/jobs/events'); } catch (_) { return; }
+  try { jobSse = new EventSource('/api/v1/jobs/events?token=' + encodeURIComponent(TOKEN)); } catch (_) { return; }
   const stEl = () => $('#sse-state');
   jobSse.addEventListener('stats', (ev) => {
     if (stEl()) { try {

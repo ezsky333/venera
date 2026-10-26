@@ -226,7 +226,11 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		// 图片/封面这类请求由 <img>/播放器直接发起，无法附加自定义 header，
 		// 所以接受 ?token= 查询参数。仅对只读的 media 路径放宽，
 		// 避免把 token 泄漏进会写数据的接口 URL 里。
-		if got == "" && strings.HasPrefix(r.URL.Path, "/api/v1/media/") {
+		// SSE（jobs/events）同理：EventSource 是浏览器原生构造，
+		// 无法带 Authorization header，只能走查询参数。
+		if got == "" &&
+			(strings.HasPrefix(r.URL.Path, "/api/v1/media/") ||
+				r.URL.Path == "/api/v1/jobs/events") {
 			got = r.URL.Query().Get("token")
 		}
 		// 常量时间比较，避免时序侧信道
