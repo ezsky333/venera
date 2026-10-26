@@ -149,6 +149,44 @@ func run(cfg config.Config, logger *slog.Logger, doImport bool, archive string) 
 		}
 	}
 
+	// ---- 源脚本同步 ----
+	//
+	// 语义是"客户端装了什么，服务端就持有什么"：
+	//   - 客户端把本地已安装的源脚本推上来（source.script）；
+	//   - 客户端卸载某个源时推 source.remove，服务端跟着删；
+	//   - 服务端从不主动全量导入 venera-configs，
+	//     否则会凭空多出用户根本没启用的几十个源，下载队列也会被撑大。
+	syncEngine.OnSourceScript = func(payload model.SourceScriptOpPayload) error {
+		if err := srcMgr.InstallByKey(payload.Source, payload.Script); err != nil {
+			logger.Warn("install source failed", "source", payload.Source, "err", err)
+			return err
+		}
+		logger.Info("source synced from client",
+			"source", payload.Source,
+			"version", payload.Version,
+			"bytes", len(payload.Script))
+		return nil
+	}
+	syncEngine.OnSourceRemove = func(sourceKey string) error {
+		if err := srcMgr.Delete(sourceKey); err != nil && !errors.Is(err, source.ErrSourceNotFound) {
+			logger.Warn("remove source failed", "source", sourceKey, "err", err)
+			return err
+		}
+		logger.Info("source removed by client", "source", sourceKey)
+		return nil
+	}
+	// 快照里的源清单以磁盘实际扫描结果为准
+	syncEngine.ListInstalledSources = func() []store.SourceInfo {
+		list := srcMgr.List()
+		out := make([]store.SourceInfo, 0, len(list))
+		for _, s := range list {
+			out = append(out, store.SourceInfo{
+				Key: s.Key, Name: s.Name, Version: s.Version, Enabled: true,
+			})
+		}
+		return out
+	}
+
 	// ---- API ----
 	srv := api.New(api.Deps{
 		Config: api.Config{

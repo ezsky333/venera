@@ -115,6 +115,9 @@ const (
 	OpHistoryUpdate  OpType = "history.update"
 	OpSourceData     OpType = "source.data"
 	OpSourceCookie   OpType = "source.cookie"
+	OpSourceScript   OpType = "source.script"
+	OpSourceRemove   OpType = "source.remove"
+	OpSourceInstall  OpType = "source.install"
 	OpSettingUpdate  OpType = "setting.update"
 )
 
@@ -175,6 +178,39 @@ type HistoryOpPayload struct {
 type SourceDataOpPayload struct {
 	Source string         `json:"source"`
 	Data   map[string]any `json:"data"`
+}
+
+// SourceScriptOpPayload 承载源的脚本本身。
+//
+// 设计要点（对应"只同步已安装的源"这个需求）：
+//   - 客户端装了什么源，就同步什么源；没装的不应该出现在服务端。
+//   - 服务端只持有被同步过来的源，下载队列自然也只会涉及这些源。
+//
+// 这与"全量下发 venera-configs 里所有源"是两种不同的语义：
+// 后者会让服务端和 pad 上都凭空多出几十个用户根本没启用的源。
+type SourceScriptOpPayload struct {
+	Source  string `json:"source"`
+	Name    string `json:"name,omitempty"`
+	Version string `json:"version,omitempty"`
+	// Script 是完整的 JS 源码。
+	Script string `json:"script"`
+}
+
+// SourceRemoveOpPayload 表示客户端卸载了一个源，服务端应当同步移除。
+type SourceRemoveOpPayload struct {
+	Source string `json:"source"`
+}
+
+// SourceInstallOpPayload 表示客户端装好了一个源（仅元信息）。
+//
+// 用于"服务端已经有这个源、客户端刚装上"的场景：客户端只需上报
+// key/name/version，脚本可以通过 /api/v1/sources/{key}/script 取回，
+// 避免把几十 KB 的脚本重复塞进 op 日志。
+type SourceInstallOpPayload struct {
+	Source   string `json:"source"`
+	Name     string `json:"name,omitempty"`
+	Version  string `json:"version,omitempty"`
+	HasLocal bool   `json:"hasLocal"`
 }
 
 // SourceCookieOpPayload 承载某个源的 Cookie 集合。

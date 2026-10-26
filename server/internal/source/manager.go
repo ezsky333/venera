@@ -125,6 +125,17 @@ func (m *Manager) Scan() error {
 	m.mu.Lock()
 	m.scripts = next
 	m.mu.Unlock()
+
+	// 把磁盘扫描结果登记到 sources 表。
+	//
+	// 必要性：/api/v1/sources 与快照都读这张表。若只在 Install/InstallByKey
+	// 里登记，服务端重启后（内存索引从磁盘重建、数据库却还是旧的）
+	// 会出现"源明明在跑、接口返回 0 个源"的不一致。
+	if rec, ok := m.store.(SourceMetaStore); ok {
+		for _, s := range next {
+			_ = rec.PutSource(s.Key, s.Name, s.Version, filepath.Base(s.Path))
+		}
+	}
 	return nil
 }
 
@@ -199,6 +210,76 @@ func (m *Manager) Install(fileName, js string) error {
 	m.scripts[key] = scriptEntry{Key: key, Name: name, Version: version, Path: path, JS: js}
 	m.mu.Unlock()
 	return nil
+}
+
+// InstallByKey 以源自身声明的 key 为文件名写入脚本。
+//
+// 与 Install 的区别：文件名不用 key（可能含路径分隔符），
+// 而是统一用 `<key>.js`，并对不安全字符做替换——
+// 这个路径来自另一端设备上送的 op，必须当成不可信输入。
+func (m *Manager) InstallByKey(key, js string) error {
+	if key == "" {
+		return fmt.Errorf("empty source key")
+	}
+	safe := sanitizeFileName(key)
+	dir := filepath.Join(m.dataDir, "sources")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+
+	// 先解析元信息：脚本语法/结构不对就不落盘，避免污染源目录
+	parsedKey, name, version, perr := parseMeta(js)
+	if perr != nil {
+		return fmt.Errorf("parse source %q: %w", key, perr)
+	}
+	if parsedKey != key {
+		return fmt.Errorf("source key mismatch: declared %q, expected %q", parsedKey, key)
+	}
+
+	path := filepath.Join(dir, safe+".js")
+	if err := os.WriteFile(path, []byte(js), 0o644); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	m.scripts[key] = scriptEntry{Key: key, Name: name, Version: version, Path: path, JS: js}
+	m.mu.Unlock()
+
+	// 同步登记到数据库：/api/v1/sources 与快照都读这张表，
+	// 只更新内存索引会导致"脚本在磁盘上、接口却查不到"。
+	if rec, ok := m.store.(SourceMetaStore); ok {
+		_ = rec.PutSource(key, name, version, filepath.Base(path))
+	}
+	return nil
+}
+
+// SourceMetaStore 是源元信息的持久化能力（由 store.Store 实现）。
+//
+// 单独定义接口而不是直接依赖 store 包：source 包只需要这两个方法，
+// 引入整个 store 会造成循环依赖风险，也让测试替身变重。
+type SourceMetaStore interface {
+	PutSource(key, name, version, file string) error
+	DeleteSource(key string) error
+}
+
+// sanitizeFileName 把 key 转成安全的文件名。
+func sanitizeFileName(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch r {
+		case '/', '\\', ':', '*', '?', '"', '<', '>', '|', 0:
+			b.WriteRune('_')
+		default:
+			b.WriteRune(r)
+		}
+	}
+	out := strings.TrimSpace(b.String())
+	if out == "" {
+		out = "source"
+	}
+	if len([]rune(out)) > 100 {
+		out = string([]rune(out)[:100])
+	}
+	return out
 }
 
 // InstallFromURL 下载并安装源脚本。
@@ -312,6 +393,9 @@ func (m *Manager) Delete(key string) error {
 	m.mu.Unlock()
 	if !ok {
 		return ErrSourceNotFound
+	}
+	if rec, ok := m.store.(SourceMetaStore); ok {
+		_ = rec.DeleteSource(key)
 	}
 	return os.Remove(e.Path)
 }

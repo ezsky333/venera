@@ -308,9 +308,12 @@ class _NasSettingState extends State<NasSetting> {
     // 后面的同步就永远不执行——现象是"显示已连接，但收藏一条都同步不过来"，
     // 而界面上完全看不出错误。
     //
-    // 补源必须排在最前：新设备一个源都没有，收藏落地了也显示不出来。
+    // 源同步必须排在最前：
+    //   1. 先把本机已装的源推上去（服务端据此知道该用哪些源跑下载）；
+    //   2. 再拉服务端有、本机没有的（本机是新设备的场景）。
     final syncFuture = () async {
-      await NasSourceSync.syncFromNas();
+      await NasSourceSync.pushToNas();
+      await NasSourceSync.pullFromNas();
       await NasSync().syncNow(full: true);
     }();
 
@@ -348,29 +351,44 @@ class _NasSettingState extends State<NasSetting> {
     App.rootPop();
   }
 
-  /// 从 NAS 补齐漫画源。
+  /// 与 NAS 双向对齐漫画源。
   ///
-  /// 强制模式（force: true）：连本机已有的同名源也覆盖。
-  /// 之所以给这个选项，是因为"我明明连上了但源还是旧的"是常见诉求，
-  /// 而自动流程为了不降级用户本机的新版只补缺失。
+  /// 语义（已与用户确认）：
+  ///   - 只同步**本机已安装的源**，不是 venera-configs 全量；
+  ///   - 先推本地已装的（服务端据此建立"这台设备在用哪些源"）；
+  ///   - 再拉服务端有、本机没有的（新设备补齐）。
+  ///
+  /// [force] 为 true 时连本机已有的同名源也覆盖脚本内容。
   Future<void> _syncSources() async {
     setState(() {
       isSyncingSources = true;
     });
-    final before = ComicSourceManager().all().length;
-    final added = await NasSourceSync.syncFromNas(force: true);
+
+    int pushed = 0;
+    int pulled = 0;
+    Object? err;
+    try {
+      pushed = await NasSourceSync.pushToNas();
+      pulled = await NasSourceSync.pullFromNas(force: true);
+    } catch (e) {
+      err = e;
+    }
+
     final after = ComicSourceManager().all().length;
     if (!mounted) return;
     setState(() {
       isSyncingSources = false;
     });
 
-    if (added == 0 && after == before) {
-      context.showMessage(message: "No new sources from NAS".tl);
+    if (err != null) {
+      context.showMessage(message: '${"Failed".tl}: $err');
+      return;
+    }
+    if (pushed == 0 && pulled == 0) {
+      context.showMessage(message: "Sources already in sync".tl);
     } else {
       context.showMessage(
-        message: "${"Synced".tl} ${after - before >= 0 ? '+' : ''}"
-            "$after",
+        message: "${"Sources synced".tl} ↑$pushed ↓$pulled ($after)",
       );
     }
     await _refreshInfo();

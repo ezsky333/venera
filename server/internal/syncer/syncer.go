@@ -30,6 +30,13 @@ type Syncer struct {
 	st *store.Store
 	// OnNewFavorites 在收藏新增后被调用（用于自动排队下载）。
 	OnNewFavorites func(items []model.Favorite) error
+	// OnSourceScript 在收到源脚本时调用（落到磁盘 + 刷新源管理器）。
+	OnSourceScript func(payload model.SourceScriptOpPayload) error
+	// OnSourceRemove 在客户端卸载源时调用。
+	OnSourceRemove func(sourceKey string) error
+	// ListInstalledSources 返回服务端当前实际持有的源（磁盘扫描结果）。
+	// 快照用它作答，保证客户端看到的源清单与真实可用的一致。
+	ListInstalledSources func() []store.SourceInfo
 }
 
 // New 创建 Syncer。
@@ -253,9 +260,70 @@ func (s *Syncer) apply(clientID string, op PushOp, lamport int64) (bool, string,
 		if payload.Key == "" {
 			return false, "setting ignored: empty key", nil, nil
 		}
+		// 空集合保护：不要让一台"刚装好、什么都还没配"的设备
+		// 用空列表覆盖另一台已经配好的设备。
+		//
+		// 真实踩过的坑：pad 首次连接 → 本地 explore_pages/categories
+		// 都是空数组 → _bootstrapPush 把它们当"我的设置"推上来
+		// → 服务端原有的 ["Picacg","禁漫天堂","E-Hell"] 被清空
+		// → 手机下次同步看到空列表，探索页也空了。
+		//
+		// 判据：值为空数组/空字符串/空 map，且服务端已有非空值时，忽略。
+		if isEmptySettingValue(payload.Value) {
+			var existing any
+			if ok, _ := s.st.GetSetting(payload.Key, &existing); ok {
+				if existing != nil && !isEmptySettingValue(existing) {
+					return false, "setting ignored: refuse to overwrite non-empty value with empty (" + payload.Key + ")", nil, nil
+				}
+			}
+		}
 		if err := s.st.PutSetting(payload.Key, payload.Value); err != nil {
 			return false, "", nil, err
 		}
+		return true, "", nil, nil
+
+	case model.OpSourceScript:
+		payload, err := decodePayload[model.SourceScriptOpPayload](op.Payload)
+		if err != nil {
+			return false, "", nil, err
+		}
+		if payload.Source == "" || payload.Script == "" {
+			return false, "source script ignored: empty source or script", nil, nil
+		}
+		// 交给上层（main 注入的回调）把脚本落到磁盘并刷新源管理器。
+		// syncer 本身不碰文件系统，保持职责单一、便于测试。
+		if s.OnSourceScript != nil {
+			if err := s.OnSourceScript(payload); err != nil {
+				return false, "", nil, err
+			}
+		}
+		return true, "", nil, nil
+
+	case model.OpSourceRemove:
+		payload, err := decodePayload[model.SourceRemoveOpPayload](op.Payload)
+		if err != nil {
+			return false, "", nil, err
+		}
+		if payload.Source == "" {
+			return false, "source remove ignored: empty source", nil, nil
+		}
+		if s.OnSourceRemove != nil {
+			if err := s.OnSourceRemove(payload.Source); err != nil {
+				return false, "", nil, err
+			}
+		}
+		return true, "", nil, nil
+
+	case model.OpSourceInstall:
+		payload, err := decodePayload[model.SourceInstallOpPayload](op.Payload)
+		if err != nil {
+			return false, "", nil, err
+		}
+		if payload.Source == "" {
+			return false, "source install ignored: empty source", nil, nil
+		}
+		// 服务端可能已经有这个源（另一个设备早先同步过），
+		// 这时只需记录"该设备装了这个源"，无需重复写脚本。
 		return true, "", nil, nil
 	}
 	return false, fmt.Sprintf("unknown op type %q", op.Type), nil, nil
@@ -347,6 +415,14 @@ type HistoryView struct {
 	model.History
 	SourceKey string `json:"sourceKey"`
 	ComicID   string `json:"comicId"`
+	// At 是更新时间的毫秒时间戳。
+	//
+	// 必须显式给出：内嵌的 model.History 把时间序列化成 `updatedAt`
+	// （RFC3339 字符串），而客户端做 LWW 比较时读的是 `at`（int 毫秒）。
+	// 字段名对不上，客户端拿到的 remoteTime 恒为 0，
+	// 于是"本地已有记录 >= 0" 永远成立，所有历史都被静默跳过。
+	// 这正是"收藏同步过来了、历史却一条都没有"的原因。
+	At int64 `json:"at"`
 }
 
 // BuildSnapshot 生成完整快照。
@@ -385,16 +461,33 @@ func (s *Syncer) BuildSnapshot() (*Snapshot, error) {
 			History:   h,
 			SourceKey: h.Source,
 			ComicID:   h.ID,
+			At:        h.UpdatedAt.UnixMilli(),
 		})
 	}
 	settings, err := s.st.AllSettings()
 	if err != nil {
 		return nil, err
 	}
+	// 剔除设备特有配置：这些项从一个设备搬到另一个设备是有害的。
+	//
+	// 判断标准（与用户确认过的原则一致）：
+	//   - 只排除"跟着这台机器走"的东西（代理、设备 ID、本机路径…）；
+	//   - 其余一律同步。多设备是同一个人在用，
+	//     "我在手机上关了某个源，平板上应该也关掉"才是预期。
+	for _, k := range DeviceOnlySettings {
+		delete(settings, k)
+	}
 	snap.Settings = settings
 	srcs, err := s.st.ListSources()
 	if err != nil {
 		return nil, err
+	}
+	// 磁盘扫描出来的源才是真相（sources 表只记录过客户端上报的元信息）。
+	// 用 SourceLister 覆盖，保证快照里的源清单与 /api/v1/sources 一致。
+	if s.ListInstalledSources != nil {
+		if live := s.ListInstalledSources(); len(live) > 0 {
+			srcs = live
+		}
 	}
 	snap.Sources = srcs
 	cursor, err := s.st.MaxOpID()
@@ -403,6 +496,60 @@ func (s *Syncer) BuildSnapshot() (*Snapshot, error) {
 	}
 	snap.Cursor = cursor
 	return snap, nil
+}
+
+// DeviceOnlySettings 是**不参与跨设备同步**的配置项。
+//
+// 与 App 侧 appdata._disableSync 保持同一套语义，并补上 NAS 自身相关的项：
+//
+//	proxy                  代理地址通常绑定到具体网络环境
+//	authorizationRequired  本机生物识别开关
+//	customImageProcessing  可能引用本机脚本路径
+//	webdav                 WebDAV 账号密码（各设备可不同）
+//	disableSyncFields      同步排除清单本身
+//	deviceId               设备标识
+//	nas                    NAS 服务端地址与 token（每台设备各自配置）
+//	nasClientId            设备级客户端 ID
+var DeviceOnlySettings = []string{
+	"proxy",
+	"authorizationRequired",
+	"customImageProcessing",
+	"webdav",
+	"disableSyncFields",
+	"deviceId",
+	"nas",
+	"nasClientId",
+}
+
+// IsDeviceOnlySetting 判断某个键是否属于设备特有配置。
+func IsDeviceOnlySetting(key string) bool {
+	for _, k := range DeviceOnlySettings {
+		if k == key {
+			return true
+		}
+	}
+	return false
+}
+
+// isEmptySettingValue 判断一个设置值是否"空"。
+//
+// 只把**结构性为空**的东西算空：空数组、空字符串、空 map、nil。
+// 刻意不把 `false` / `0` 当成空 —— 那些是有意义的用户选择
+// （例如 reverseChapterOrder=false 是"不要倒序"，不能拿它当"未设置"）。
+func isEmptySettingValue(v any) bool {
+	switch x := v.(type) {
+	case nil:
+		return true
+	case string:
+		return x == ""
+	case []any:
+		return len(x) == 0
+	case []string:
+		return len(x) == 0
+	case map[string]any:
+		return len(x) == 0
+	}
+	return false
 }
 
 // decodePayload 把 any 重新编码/解码成具体类型。

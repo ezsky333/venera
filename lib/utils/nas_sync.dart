@@ -12,6 +12,7 @@ import 'package:venera/foundation/history.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/nas_client.dart';
 import 'package:venera/utils/nas_cookie_export.dart';
+import 'package:venera/utils/nas_settings_sync.dart';
 
 class NasSync with ChangeNotifier {
   static NasSync? _instance;
@@ -268,12 +269,20 @@ class NasSync with ChangeNotifier {
       await flush();
 
       if (full) {
-        // 首次连接 / 游标丢失：
-        //   1. 先把本地已有的收藏与历史**全量上推**（否则服务端永远是空的，
-        //      因为它只见到"变更"，而用户的历史数据在连 NAS 之前就存在了）
-        //   2. 再拉快照，接收其他设备的既有数据
-        await _bootstrapPush();
+        // 首次连接 / 游标丢失时的顺序**至关重要**：先拉后推。
+        //
+        // 1) 先拉快照：接收其他设备（手机）已有的收藏、历史、设置。
+        //    新装的 App 本地是"一堆默认值"（readerMode=galleryLeftToRight、
+        //    explore_pages=[] 等）。若先推，这些默认值会把手机上
+        //    真实配置覆盖掉——实测 pad 首次连接就把 readerMode 从
+        //    "page" 改成了 "galleryLeftToRight"，手机跟着也变了。
+        //
+        // 2) 再推本地：把"这台设备独有、服务端还没有"的数据补上去
+        //    （典型场景：手机第一次连 NAS，服务端是空的）。
+        //
+        // 两步都是幂等的：收藏是集合语义、历史是 LWW、设置是覆盖。
         await _pullSnapshot();
+        await _bootstrapPush();
       } else {
         await _pullIncremental();
       }
@@ -376,6 +385,14 @@ class NasSync with ChangeNotifier {
       }
     } catch (e) {
       Log.error('NAS Sync', 'bootstrap: read source configs failed: $e');
+    }
+
+    // ---- 界面结构类设置（探索页 / 分类页 / 搜索源 / 阅读器偏好 ...）----
+    // 不推这些，新设备上"收藏都有了但探索页是空的"。
+    try {
+      ops.addAll(NasSettingsSync.buildOps());
+    } catch (e) {
+      Log.error('NAS Sync', 'bootstrap: read settings failed: $e');
     }
 
     if (ops.isEmpty) return;
@@ -482,15 +499,62 @@ class NasSync with ChangeNotifier {
       });
     }
 
+    // ---- 阅读历史 ----
+    // 早期实现只统计了 histories 的数量、却从没调用 _applyRemoteHistory，
+    // 于是"收藏同步了、历史一条都没有"——数据在快照里，就是没人处理。
+    var histories = snap['histories'];
+    var histApplied = 0;
+    var histFailed = 0;
+    if (histories is List) {
+      for (final h in histories) {
+        if (h is! Map) continue;
+        try {
+          _applyRemoteHistory(Map<String, dynamic>.from(h));
+          histApplied++;
+        } catch (e) {
+          histFailed++;
+        }
+      }
+    }
+
     Log.info(
       'NAS Sync',
       'snapshot applied: favorites=$applied failed=$failed '
-      'histories=${(snap['histories'] as List?)?.length ?? 0}'
+      'histories=$histApplied/${(histories as List?)?.length ?? 0} '
+      'histFailed=$histFailed'
       '${_firstApplyError != null ? ' | first error: $_firstApplyError' : ''}',
     );
 
     var cursor = (snap['cursor'] as num?)?.toInt();
     if (cursor != null) await client.updateCursor(cursor);
+
+    // ---- 界面结构类设置 ----
+    // 「探索」页显示"没有探索页面"、「分类」页显示"没有分类页面"，
+    // 根因是这两页由 appdata.settings 的列表驱动，与收藏无关。
+    // 早期版本完全没同步设置，所以数据到了、页面还是空的。
+    //
+    // 必须 await：full 同步是"先拉后推"，若设置还没落地就开始推，
+    // 推上去的会是本机的出厂默认值，把别的设备的配置覆盖掉。
+    await _applyRemoteSettings(snap['settings']);
+  }
+
+  /// 应用快照里的设置项。
+  Future<void> _applyRemoteSettings(dynamic raw) async {
+    if (raw is! Map) return;
+    final remote = <String, dynamic>{};
+    for (final e in raw.entries) {
+      remote[e.key.toString()] = e.value;
+    }
+    if (remote.isEmpty) return;
+
+    try {
+      final n = await NasSettingsSync.apply(remote);
+      if (n > 0) {
+        Log.info('NAS Sync', 'applied $n settings from NAS');
+      }
+    } catch (e) {
+      Log.error('NAS Sync', 'apply settings failed: $e');
+    }
   }
 
   Dio? _dio(NasClient client) {
@@ -649,9 +713,14 @@ class NasSync with ChangeNotifier {
       var comicId = (p['comicId'] ?? p['id'])?.toString() ?? '';
       if (comicId.isEmpty) return;
       var existing = HistoryManager().find(comicId, type);
-      var remoteTime = (p['at'] as num?)?.toInt() ?? 0;
-      // LWW：远端更新时间更旧就不覆盖本地
+      var remoteTime = _timeOf(p);
+      // LWW：远端更新时间更旧就不覆盖本地。
+      //
+      // remoteTime == 0 表示对方没给时间（旧数据/字段缺失），
+      // 此时不能套用 LWW —— 否则"本地任意记录 >= 0"恒成立，
+      // 会把真实进度当成"更旧的"丢掉，正是历史同步失效的表现。
       if (existing != null &&
+          remoteTime > 0 &&
           existing.time.millisecondsSinceEpoch >= remoteTime) {
         return;
       }
@@ -677,6 +746,27 @@ class NasSync with ChangeNotifier {
     } catch (e) {
       Log.error('NAS Sync', 'apply remote history failed: $e');
     }
+  }
+
+  /// 从远端历史 payload 里解析时间（毫秒）。
+  ///
+  /// 三种形态都要认，因为两端字段名不一致且历史数据还混着旧格式：
+  ///   at         增量 op / 新快照（int 毫秒）
+  ///   updatedAt  旧快照（RFC3339 字符串）
+  ///   time       某些历史版本用的字段
+  ///
+  /// 早期实现只读 `at`，拿到 0 后 LWW 判定"本地更新"，
+  /// 于是所有历史记录被静默跳过 —— 收藏同步了、历史一条都没有。
+  static int _timeOf(Map<String, dynamic> p) {
+    final raw = p['at'] ?? p['updatedAt'] ?? p['time'];
+    if (raw == null) return 0;
+    if (raw is num) return raw.toInt();
+    final s = raw.toString();
+    if (s.isEmpty) return 0;
+    final asInt = int.tryParse(s);
+    if (asInt != null) return asInt;
+    final dt = DateTime.tryParse(s);
+    return dt?.millisecondsSinceEpoch ?? 0;
   }
 
   String _deviceName() {

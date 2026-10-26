@@ -6,7 +6,7 @@
 // （例如冷启动早期、或某些 ABI 上初始化失败），所有请求都会抛
 //   Bad state: flutter_rust_bridge has not been initialized
 // NAS 是纯 HTTP/JSON，用系统 HTTP 栈更可靠，也避免和 Rust 生命周期耦合。
-import 'dart:io' show HttpClient;
+import 'dart:io' show HttpClient, Platform;
 
 import 'package:dio/dio.dart';
 import 'package:dio/io.dart';
@@ -478,6 +478,68 @@ class NasClient {
       return list.map((e) => Map<String, dynamic>.from(e as Map)).toList();
     } catch (e) {
       return [];
+    }
+  }
+
+  /// 服务端已持有的源清单（key → version）。
+  ///
+  /// 用于跳过未变更的源脚本上传：脚本单个几十 KB、几十个就是几百 KB，
+  /// 每次启动都全量重传既慢又浪费。
+  Future<Map<String, String>> sourceManifest() async {
+    if (!isEnabled) return {};
+    final dio = _dio;
+    if (dio == null) return {};
+    try {
+      var res = await dio.get('/api/v1/sources');
+      if (res.statusCode != 200 || res.data is! Map) return {};
+      var list = (res.data['sources'] as List?) ?? [];
+      final out = <String, String>{};
+      for (final e in list) {
+        final m = Map<String, dynamic>.from(e as Map);
+        final key = m['key']?.toString() ?? '';
+        if (key.isEmpty) continue;
+        out[key] = m['version']?.toString() ?? '';
+      }
+      return out;
+    } catch (e) {
+      return {};
+    }
+  }
+
+  /// 推送一批同步操作（与 NasSync.flush 走同一个端点，但允许调用方自带 clientId）。
+  Future<bool> pushOps(List<Map<String, dynamic>> ops) async {
+    if (!isEnabled || ops.isEmpty) return false;
+    final dio = _dio;
+    if (dio == null) return false;
+    try {
+      var res = await dio.post('/api/v1/sync/push', data: {
+        'clientId': _config.clientId,
+        'deviceName': _deviceName,
+        'lamport': DateTime.now().millisecondsSinceEpoch,
+        'ops': ops,
+      });
+      if (res.statusCode == 200 && res.data is Map) {
+        final cursor = (res.data['cursor'] as num?)?.toInt();
+        if (cursor != null) await updateCursor(cursor);
+        return true;
+      }
+      return false;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /// 设备名，仅用于服务端运维时区分来源。
+  static String get _deviceName {
+    try {
+      if (Platform.isAndroid) return 'android';
+      if (Platform.isIOS) return 'ios';
+      if (Platform.isWindows) return 'windows';
+      if (Platform.isMacOS) return 'macos';
+      if (Platform.isLinux) return 'linux';
+      return 'unknown';
+    } catch (_) {
+      return 'unknown';
     }
   }
 
