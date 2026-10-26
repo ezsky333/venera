@@ -139,14 +139,16 @@ class NasSync with ChangeNotifier {
     if (!isEnabled) return;
     var source = ComicSource.find(sourceKey);
     if (source == null) return;
-    _pendingOps.add({
-      'type': 'source.data',
-      'payload': {
-        'source': sourceKey,
-        'data': Map<String, dynamic>.from(source.data),
-      },
-    });
-    _enqueueCookies(sourceKey, source.data);
+    final data = Map<String, dynamic>.from(source.data);
+    // 空 data 不推 data op（服务端有"拒绝空值覆盖"的保护，推了也是白推），
+    // 但 **Cookie 仍然要推**：不需要账号的源只靠 Cookie 维持登录态。
+    if (data.isNotEmpty) {
+      _pendingOps.add({
+        'type': 'source.data',
+        'payload': {'source': sourceKey, 'data': data},
+      });
+    }
+    _enqueueCookies(sourceKey, data);
     _scheduleFlush();
   }
 
@@ -377,12 +379,19 @@ class NasSync with ChangeNotifier {
     try {
       for (final source in ComicSourceManager().all()) {
         final data = source.data;
-        if (data.isEmpty) continue;
         final plain = Map<String, dynamic>.from(data);
-        ops.add({
-          'type': 'source.data',
-          'payload': {'source': source.key, 'data': plain},
-        });
+        // 注意：不能因为 data 为空就 continue。
+        //
+        // 很多源**根本不需要账号密码**（nhentai 就是典型：data 文件是空的），
+        // 但登录态仍然在 Cookie 里。早先的写法 `if (data.isEmpty) continue;`
+        // 会把这类源连同它的 Cookie 一起跳过，表现为"服务端一条 nhentai
+        // cookie 都没有"，登录态自然传不过去。
+        if (plain.isNotEmpty) {
+          ops.add({
+            'type': 'source.data',
+            'payload': {'source': source.key, 'data': plain},
+          });
+        }
         // 登录态常常只存在于 Cookie 里，必须一起推
         final cookies = NasCookieExport.exportForSource(source.key, plain);
         if (cookies.isNotEmpty) {

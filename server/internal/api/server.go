@@ -106,6 +106,8 @@ func (s *Server) Handler() http.Handler {
 
 	api.HandleFunc("POST /api/v1/download", s.handleDownload)
 	api.HandleFunc("POST /api/v1/download/favorites", s.handleDownloadFavorites)
+	// 补抓存量封面：只下载缺失的 cover，不动已有内页
+	api.HandleFunc("POST /api/v1/download/covers", s.handleRefetchCovers)
 	api.HandleFunc("GET /api/v1/jobs", s.handleJobs)
 	api.HandleFunc("GET /api/v1/jobs/{id}", s.handleJob)
 	api.HandleFunc("POST /api/v1/jobs/{id}/cancel", s.handleCancelJob)
@@ -671,6 +673,21 @@ func (s *Server) handleDownloadFavorites(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"queued": n})
+}
+
+// handleRefetchCovers 补抓"已缓存但缺封面"的漫画的封面。
+//
+// 全量下载任务不重跑（重跑 = 重新下载所有内页），所以早期因封面
+// 301 失败留下的缺口需要这个独立入口来补。
+func (s *Server) handleRefetchCovers(w http.ResponseWriter, r *http.Request) {
+	tried, ok, err := s.dl.RefetchCovers()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"tried": tried, "fetched": ok,
+	})
 }
 
 func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {

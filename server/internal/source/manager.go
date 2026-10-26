@@ -232,7 +232,17 @@ func (m *Manager) InstallByKey(key, js string) error {
 	if perr != nil {
 		return fmt.Errorf("parse source %q: %w", key, perr)
 	}
-	if parsedKey != key {
+	// key 比对**不区分大小写**，并以脚本自己声明的写法为准。
+	//
+	// 现实的源里确实存在这种情况：komiic 的脚本声明 key 为 `Komiic`，
+	// 而客户端同步时用的是规范化后的小写 `komiic`。严格比对会让这个源
+	// 永远装不上（日志是 "source key mismatch: declared \"Komiic\",
+	// expected \"komiic\""），用户看到的现象是"别的源都同步了，就它没有"。
+	//
+	// 存储一律用小写 key：下游的目录名、DB 主键、按 key 查脚本都按小写，
+	// 混用两种写法会分裂成两个源。
+	key = strings.ToLower(key)
+	if !strings.EqualFold(parsedKey, key) {
 		return fmt.Errorf("source key mismatch: declared %q, expected %q", parsedKey, key)
 	}
 

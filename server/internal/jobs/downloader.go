@@ -77,6 +77,57 @@ func (d *Downloader) SetTransform(f TransformFunc) { d.transform = f }
 // SetFetch 注入图片下载实现。
 func (d *Downloader) SetFetch(f FetchFunc) { d.fetch = f }
 
+// RefetchCovers 扫描库里"有章节缓存但缺 cover 文件"的漫画，补抓封面。
+//
+// 背景：早期版本的图片抓取不跟随跨 host 重定向，picacg 的封面
+// （storage1 → storage-b 301）全数失败，而内页正常，于是出现
+// "171 本已缓存、只有 66 本有封面"的存量缺口。抓取修复只对新
+// 下载生效，已下载的这批漫画不会自动重跑（重跑会重复下载全部内页），
+// 因此需要这个只补封面的轻量入口。
+//
+// 返回 (尝试数, 成功数, 错误)。
+func (d *Downloader) RefetchCovers() (int, int, error) {
+	items, err := d.store.ComicWithChapters()
+	if err != nil {
+		return 0, 0, err
+	}
+	tried, ok := 0, 0
+	for _, it := range items {
+		src, _ := it["source"].(string)
+		cid, _ := it["comicId"].(string)
+		title, _ := it["title"].(string)
+		coverURL, _ := it["cover"].(string)
+		dir, _ := it["dir"].(string)
+		if src == "" || cid == "" || dir == "" || coverURL == "" {
+			continue
+		}
+		baseDir := filepath.Join(d.store.LibraryDir(), dir)
+		if coverExists(baseDir) {
+			continue
+		}
+		tried++
+		detail := &model.ComicDetail{
+			Comic: model.Comic{Source: src, ID: cid, Title: title, Cover: coverURL},
+		}
+		if err := d.saveCover(detail, baseDir); err != nil {
+			d.logf("cover refetch failed for %s: %v", cid, err)
+			continue
+		}
+		ok++
+	}
+	return tried, ok, nil
+}
+
+// coverExists 判断漫画目录是否已有封面文件（任意候选扩展名）。
+func coverExists(baseDir string) bool {
+	for _, ext := range store.CoverExtCandidates {
+		if _, err := os.Stat(filepath.Join(baseDir, "cover"+ext)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
 // RunJob 执行一个下载任务。
 //
 // 目录布局与 App 的 LocalManager 保持一致：

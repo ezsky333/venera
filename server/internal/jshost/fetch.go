@@ -16,15 +16,24 @@ import (
 // TransformModifyImage）。
 func FetchImage(client HTTPDoer, rawURL string, headers map[string]string) ([]byte, error) {
 	if client == nil {
-		client = DefaultClient()
+		client = imageClient(ProxyConfig{})
 	}
 	return fetchImageWith(client, rawURL, headers)
 }
 
 // FetchImageWithProxy 按代理配置下载图片。
-func FetchImageWithProxy(client HTTPDoer, rawURL string, headers map[string]string) ([]byte, error) {
-	return FetchImage(client, rawURL, headers)
+//
+// 使用 imageClient（跟随重定向）而不是 API 用的 DefaultClient：
+// 图床 301 跳 CDN 是常态，见 imageClient 的注释。
+func FetchImageWithProxy(_ HTTPDoer, rawURL string, headers map[string]string) ([]byte, error) {
+	return fetchImageWith(imageClient(proxyProvider()), rawURL, headers)
 }
+
+// proxyProvider 返回进程级代理配置（由 main 通过 SetProxyProvider 注册）。
+var proxyProvider = func() ProxyConfig { return ProxyConfig{} }
+
+// SetProxyProvider 注册进程级代理配置读取器（main 启动时调用一次）。
+func SetProxyProvider(fn func() ProxyConfig) { proxyProvider = fn }
 
 func fetchImageWith(client HTTPDoer, rawURL string, headers map[string]string) ([]byte, error) {
 	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
@@ -61,6 +70,24 @@ func fetchImageWith(client HTTPDoer, rawURL string, headers map[string]string) (
 		return nil, fmt.Errorf("image fetch: empty body")
 	}
 	return b, nil
+}
+
+// imageClient 返回**专用于图片下载**的 HTTP 客户端。
+//
+// 与 API 用的 DefaultClient 的唯一区别是重定向策略：
+// API 调用把 3xx 原样交回源脚本（exhentai 用 302 表达"需要登录"，
+// 源脚本靠 `if (res.status !== 200)` 给出可读错误）；而图片请求没有
+// 这个语义，图床把请求 301/302 跳到 CDN 是**常态**——
+// picacg 的封面（storage1.picacomic.com → storage-b.picacomic.com）
+// 曾因跨 host 重定向被拦，导致全库 1 万多张内页下载成功、封面却
+// 只落盘了 1 张。因此图片客户端必须跟随重定向。
+//
+// 返回的 client 无共享状态，调用方可按需缓存。
+func imageClient(pc ProxyConfig) *http.Client {
+	return &http.Client{
+		Transport: pc.transport(),
+		Timeout:   90 * time.Second,
+	}
 }
 
 func originOf(rawURL string) string {

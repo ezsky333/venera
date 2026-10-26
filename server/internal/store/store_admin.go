@@ -298,4 +298,41 @@ func comicDirOf(chapterDir string) string {
 // CoverExtCandidates 是封面可能使用的扩展名（按落盘时的魔数决定）。
 var CoverExtCandidates = []string{".png", ".jpg", ".jpeg", ".webp", ".gif"}
 
+// ComicsWithChapters 返回所有"有至少一章已缓存"的漫画及其章节目录。
+//
+// 供封面补抓使用：这些漫画的内页已在盘上，但其中一部分可能因
+// 封面下载失败（如 picacg 封面 301 跳 CDN 未跟随）而缺 cover 文件。
+// coverDir 一并返回，调用方据此判断磁盘上是否已有 cover。
+func (s *Store) ComicWithChapters() ([]map[string]any, error) {
+	rows, err := s.db.Query(`
+		SELECT c.source, c.comic_id, COALESCE(c.title,''),
+		       COALESCE(c.cover,''), cc.dir
+		FROM cached_chapters cc
+		JOIN comics c
+		  ON c.source = cc.source AND c.comic_id = cc.comic_id
+		GROUP BY c.source, c.comic_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []map[string]any
+	for rows.Next() {
+		var src, cid, title, cover, dir string
+		if err := rows.Scan(&src, &cid, &title, &cover, &dir); err != nil {
+			return nil, err
+		}
+		// dir 形如 "标题 [id]/1"，第一层即漫画目录
+		comicDir := dir
+		if i := strings.IndexByte(comicDir, '/'); i > 0 {
+			comicDir = comicDir[:i]
+		}
+		out = append(out, map[string]any{
+			"source": src, "comicId": cid, "title": title,
+			"cover": cover, "dir": comicDir,
+		})
+	}
+	return out, rows.Err()
+}
+
 var _ = sql.ErrNoRows
