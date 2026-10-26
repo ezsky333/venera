@@ -115,7 +115,21 @@ func (s *Server) Handler() http.Handler {
 	api.HandleFunc("POST /api/v1/sources/{key}/probe", s.handleSourceProbe)
 	api.HandleFunc("GET /api/v1/sources/{key}/features", s.handleSourceFeatures)
 
+	// ---- 管理面板 ----
+	api.HandleFunc("GET /api/v1/admin/stats", s.handleAdminStats)
+	api.HandleFunc("GET /api/v1/admin/library", s.handleAdminLibrary)
+	api.HandleFunc("GET /api/v1/admin/chapters", s.handleAdminChapters)
+	api.HandleFunc("GET /api/v1/admin/comic", s.handleAdminComic)
+	api.HandleFunc("GET /api/v1/admin/folders", s.handleAdminFolders)
+	api.HandleFunc("GET /api/v1/admin/jobs", s.handleAdminJobs)
+	api.HandleFunc("POST /api/v1/admin/comic/delete", s.handleAdminDeleteComic)
+	api.HandleFunc("POST /api/v1/admin/chapter/delete", s.handleAdminDeleteChapter)
+
 	mux.Handle("/api/v1/", s.authMiddleware(api))
+
+	// ---- 管理面板页面（静态空壳，数据靠 token 拉取）----
+	mux.HandleFunc("GET /admin", s.handleAdminIndex)
+	mux.HandleFunc("GET /admin/", s.handleAdminIndex)
 
 	// ---- WebDAV 兼容（W1 兜底）----
 	if s.cfg.EnableWebDAV {

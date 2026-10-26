@@ -9,6 +9,12 @@ import 'package:venera/utils/ext.dart';
 class CookieJarSql {
   late Database _db;
 
+  /// 只读访问底层库（NAS 同步需要把 Cookie 导出给服务端）。
+  ///
+  /// 直接暴露 Database 而不是再包一层查询接口，是因为导出要按域名集合
+  /// 一次性筛选，用 SQL 表达最直接；调用方只做 SELECT。
+  Database get rawDb => _db;
+
   final String path;
 
   CookieJarSql(this.path){

@@ -70,17 +70,17 @@ const DefaultProxyBypass = "localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192
 
 func Default() Config {
 	return Config{
-		Listen:                ":8080",
-		DataDir:               "/data",
-		LibraryDir:            "/library",
-		SourceListURL:         "https://cdn.jsdelivr.net/gh/venera-app/venera-configs@main/index.json",
-		Workers:               3,
-		DownloadConcurrency:   4,
-		GlobalRPS:             3,
-		SyncRetention:         90 * 24 * time.Hour,
+		Listen:             ":8080",
+		DataDir:            "/data",
+		LibraryDir:         "/library",
+		SourceListURL:      "https://cdn.jsdelivr.net/gh/venera-app/venera-configs@main/index.json",
+		Workers:            4,
+		DownloadConcurrency: 6,
+		GlobalRPS:          3,
+		SyncRetention:      90 * 24 * time.Hour,
 		AutoDownloadFavorites: true,
-		Proxy:                 "",
-		ProxyBypass:           DefaultProxyBypass,
+		Proxy:              "",
+		ProxyBypass:        DefaultProxyBypass,
 	}
 }
 

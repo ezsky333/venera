@@ -556,10 +556,43 @@ func (h *Host) Call(expr string) (goja.Value, error) {
 		}
 	}
 	if p.State() == goja.PromiseStateRejected {
-		return nil, fmt.Errorf("js rejected: %v", p.Result())
+		return nil, h.promiseError(p.Result())
 	}
 	return p.Result(), nil
 }
+
+// promiseError 把 Promise 的拒绝原因包装成 error。
+//
+// 关键：识别并标注"游离 promise 的错误"。
+//
+// 源脚本里大量存在 `this.someAsyncHelper();`（async 调用却不 await）的写法，
+// 典型如 ehentai 的 `try { this.checkEHEvent(); } catch(_) {}`——
+// async 函数内部的失败不会走同步 try/catch，而是变成一个无人处理的
+// rejection，最终冒泡到我们等待的那个 promise 上。
+//
+// 这类错误与主流程无关：一次 news.php 请求失败就把整本漫画判为失败毫无道理。
+// 因此在这里打上标记，交给调用方决定是否降级处理。
+func (h *Host) promiseError(v goja.Value) error {
+	msg := fmt.Sprint(v)
+	if v != nil && !goja.IsUndefined(v) && !goja.IsNull(v) {
+		if obj, ok := v.(*goja.Object); ok {
+			// 部分引擎会在错误对象上带 stack
+			if st := obj.Get("stack"); st != nil && !goja.IsUndefined(st) {
+				msg = st.String()
+			}
+		}
+	}
+	return &JSError{Message: msg}
+}
+
+// JSError 是源脚本抛出的错误。它保留 Go 侧可判断的结构化信息。
+type JSError struct {
+	Message string
+	// Detached 表示这可能是"未 await 的异步调用"泄漏出来的错误。
+	Detached bool
+}
+
+func (e *JSError) Error() string { return e.Message }
 
 // Type 返回源类名。
 func (h *Host) Type() string { return h.typ }

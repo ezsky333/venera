@@ -17,6 +17,7 @@ import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/history.dart';
 import 'package:venera/foundation/image_provider/cached_image.dart';
 import 'package:venera/foundation/local.dart';
+import 'package:venera/foundation/nas_chapter_cache.dart';
 import 'package:venera/foundation/nas_client.dart';
 import 'package:venera/foundation/res.dart';
 import 'package:venera/network/download.dart';
@@ -81,6 +82,12 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
 
   bool showFAB = false;
 
+  /// NAS 章节缓存状态。详情页渲染完就开始拉，用于给章节打角标。
+  ///
+  /// 刻意**不**阻塞首屏：NAS 只是增强，离线时必须和原版行为完全一致。
+  @override
+  NasChapterCache? nasCache;
+
   @override
   void onReadEnd() {
     history ??= HistoryManager().find(
@@ -133,9 +140,32 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
     super.initState();
   }
 
+  /// 数据加载完成后启动 NAS 缓存查询。
+  ///
+  /// 放在 buildContent 前而不是 initState：initState 时 comic 还没到手，
+  /// 拿不到标题；而且加载失败（NetworkError）时不该白跑一次 NAS 请求。
+  void _ensureNasCache() {
+    if (nasCache != null) return;
+    final cache = NasChapterCache(
+      sourceKey: widget.sourceKey,
+      comicId: widget.id,
+      title: comic.title,
+    );
+    cache.addListener(_onNasCacheChanged);
+    nasCache = cache;
+    // 不 await：NAS 慢或离线都不该拖住详情页
+    unawaited(cache.load());
+  }
+
+  void _onNasCacheChanged() {
+    if (mounted) setState(() {});
+  }
+
   @override
   void dispose() {
     scrollController.removeListener(onScroll);
+    nasCache?.removeListener(_onNasCacheChanged);
+    nasCache?.dispose();
     super.dispose();
   }
 
@@ -709,9 +739,11 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
     if (comic.chapters == null) {
       return const SliverPadding(padding: EdgeInsets.zero);
     }
+    _ensureNasCache();
     return _ComicChapters(
       history: history,
       groupedMode: comic.chapters!.isGrouped,
+      nasCache: nasCache,
     );
   }
 

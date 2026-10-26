@@ -65,9 +65,18 @@ func (h *Host) convertMap(obj map[string]any) goja.Value {
 		if isEncode {
 			return h.vm.ToValue(base64.StdEncoding.EncodeToString(value))
 		}
-		out, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(value)))
+		// 服务端拿到的往往是 HTTP 正文，而不是用户手输的字符串：
+		// 上游时不时会在 base64 前面加 UTF-8 BOM（jm 的域名列表就是这样），
+		// 严格的 StdEncoding.DecodeString 会直接失败，源随后拿到 null，
+		// 报出来的却是 "Unexpected end of JSON input"——离现场十万八千里。
+		// 浏览器/Dart 的 atob 会跳过空白，这里把 BOM 一并剔掉。
+		out, err := base64.StdEncoding.DecodeString(strings.Trim(stripBOM(string(value)), " \t\r\n"))
 		if err != nil {
-			return fail(err)
+			// 容错：部分站点使用无填充或 URL-safe 变体
+			out, err = decodeBase64Lenient(string(value))
+			if err != nil {
+				return fail(err)
+			}
 		}
 		return h.bytesToArrayBuffer(out)
 
@@ -342,3 +351,25 @@ func (h *Host) bytesToArrayBuffer(b []byte) goja.Value {
 }
 
 func base64Std(b []byte) string { return base64.StdEncoding.EncodeToString(b) }
+
+// stripBOM 移除 UTF-8 BOM。上游返回的文本里带 U+FEFF 是常见现象
+// （尤其 CDN 回源时），它会让 base64/JSON 解析同时失败。
+func stripBOM(s string) string {
+	return strings.TrimPrefix(s, "\ufeff")
+}
+
+// decodeBase64Lenient 兼容无填充 / URL-safe 的 base64。
+func decodeBase64Lenient(s string) ([]byte, error) {
+	s = strings.Map(func(r rune) rune {
+		switch r {
+		case ' ', '\t', '\r', '\n', '\ufeff':
+			return -1
+		}
+		return r
+	}, s)
+	s = strings.NewReplacer("-", "+", "_", "/").Replace(s)
+	if m := len(s) % 4; m != 0 {
+		s += strings.Repeat("=", 4-m)
+	}
+	return base64.StdEncoding.DecodeString(s)
+}

@@ -333,6 +333,94 @@ class NasClient {
     }
   }
 
+  /// 删除 NAS 上某一章的缓存。
+  Future<bool> deleteChapter({
+    required String sourceKey,
+    required String comicId,
+    required String chapterId,
+  }) async {
+    if (!isEnabled) return false;
+    final dio = _dio;
+    if (dio == null) return false;
+    try {
+      var res = await dio.delete(
+        '/api/v1/library/$sourceKey/${Uri.encodeComponent(comicId)}'
+        '/${Uri.encodeComponent(chapterId)}',
+      );
+      return res.statusCode == 200;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /// 删除 NAS 上一部漫画的全部缓存。
+  Future<bool> deleteComic({
+    required String sourceKey,
+    required String comicId,
+  }) async {
+    if (!isEnabled) return false;
+    final dio = _dio;
+    if (dio == null) return false;
+    try {
+      var res = await dio.post('/api/v1/admin/comic/delete', data: {
+        'source': sourceKey,
+        'comicId': comicId,
+      });
+      return res.statusCode == 200;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /// 列出 NAS 上的下载任务（供「下载管理」页使用）。
+  Future<List<Map<String, dynamic>>> jobs({String? status, int limit = 200}) async {
+    if (!isEnabled) return [];
+    final dio = _dio;
+    if (dio == null) return [];
+    try {
+      var res = await dio.get('/api/v1/admin/jobs', queryParameters: {
+        if (status != null && status.isNotEmpty) 'status': status,
+        'limit': limit,
+      });
+      if (res.statusCode != 200 || res.data is! Map) return [];
+      var list = (res.data['jobs'] as List?) ?? [];
+      return list.map((e) => Map<String, dynamic>.from(e as Map)).toList();
+    } catch (e) {
+      return [];
+    }
+  }
+
+  /// 取消一个任务。
+  Future<bool> cancelJob(int jobId) async {
+    if (!isEnabled) return false;
+    final dio = _dio;
+    if (dio == null) return false;
+    try {
+      var res = await dio.post('/api/v1/jobs/$jobId/cancel');
+      return res.statusCode == 200;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /// 重试全部失败任务。
+  Future<int> retryFailed({String? sourceKey}) async {
+    if (!isEnabled) return 0;
+    final dio = _dio;
+    if (dio == null) return 0;
+    try {
+      var res = await dio.post('/api/v1/jobs/retry', data: {
+        if (sourceKey != null) 'source': sourceKey,
+      });
+      if (res.statusCode == 200 && res.data is Map) {
+        return (res.data['requeued'] as num?)?.toInt() ?? 0;
+      }
+      return 0;
+    } catch (e) {
+      return 0;
+    }
+  }
+
   /// 获取任务状态。
   Future<Map<String, dynamic>?> getJob(int jobId) async {
     if (!isEnabled) return null;

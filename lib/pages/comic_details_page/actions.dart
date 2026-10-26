@@ -9,6 +9,9 @@ abstract mixin class _ComicPageActions {
 
   History? get history;
 
+  /// NAS 章节缓存状态（由 _ComicPageState 提供；未启用 NAS 时为 null）。
+  NasChapterCache? get nasCache;
+
   bool isLiking = false;
 
   bool isLiked = false;
@@ -175,8 +178,9 @@ abstract mixin class _ComicPageActions {
       App.rootContext.showMessage(message: "Failed to queue NAS download".tl);
       return;
     }
+    // 插值不能放进 .tl 的键里（键是字面量，带变量就永远命中不了翻译表）
     App.rootContext.showMessage(
-      message: "Queued on NAS (job #$jobId)".tl,
+      message: "${"Queued on NAS".tl} (#$jobId)",
     );
 
     // 轻量进度反馈：轮询直到完成或失败（避免用户不知道进度）
@@ -197,8 +201,11 @@ abstract mixin class _ComicPageActions {
         return;
       }
       if (status == 'failed') {
+        final reason = job['error']?.toString() ?? '';
         App.rootContext.showMessage(
-          message: "NAS download failed: ${job['error'] ?? 'unknown'}".tl,
+          message: reason.isEmpty
+              ? "NAS download failed".tl
+              : "${"NAS download failed".tl}: $reason",
         );
         return;
       }
@@ -418,6 +425,47 @@ abstract mixin class _ComicPageActions {
                 launchUrlString(comic.url!);
               },
             ),
+          // ---- NAS 相关 ----
+          // 只在启用且在线时出现：离线时这些操作全都会静默失败，
+          // 给用户一个点了没反应的菜单项比不给更糟。
+          if (NasClient.instance.isEnabled &&
+              (nasCache?.isAvailable ?? false)) ...[
+            MenuEntry(
+              icon: Icons.cloud_download_outlined,
+              text: "Download whole comic to NAS".tl,
+              onClick: () async {
+                final ok =
+                    await nasCache!.requestDownload();
+                context.showMessage(
+                  message: ok
+                      ? "Queued download to NAS".tl
+                      : "Failed to request NAS download".tl,
+                );
+              },
+            ),
+            if (nasCache!.cachedChapters.isNotEmpty)
+              MenuEntry(
+                icon: Icons.cloud_off_outlined,
+                text: "Delete all cached chapters of this comic".tl,
+                onClick: () async {
+                  final ok = await nasCache!.deleteComic();
+                  context.showMessage(
+                    message: ok
+                        ? "Deleted from NAS".tl
+                        : "Failed to delete from NAS".tl,
+                  );
+                },
+              ),
+            MenuEntry(
+              icon: Icons.dns_outlined,
+              text: "Open NAS admin panel".tl,
+              onClick: () {
+                launchUrlString(
+                  '${NasClient.instance.config.baseUrl}/admin',
+                );
+              },
+            ),
+          ],
         ]);
   }
 

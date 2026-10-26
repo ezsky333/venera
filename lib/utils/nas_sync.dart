@@ -11,6 +11,7 @@ import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/history.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/nas_client.dart';
+import 'package:venera/utils/nas_cookie_export.dart';
 
 class NasSync with ChangeNotifier {
   static NasSync? _instance;
@@ -35,6 +36,9 @@ class NasSync with ChangeNotifier {
   final List<Map<String, dynamic>> _pendingOps = [];
 
   int get pendingCount => _pendingOps.length;
+
+  /// 首次应用远端收藏失败的原因（诊断用，成功后清空）。
+  String? _firstApplyError;
 
   Timer? _debounce;
 
@@ -137,7 +141,27 @@ class NasSync with ChangeNotifier {
         'data': Map<String, dynamic>.from(source.data),
       },
     });
+    _enqueueCookies(sourceKey, source.data);
     _scheduleFlush();
+  }
+
+  /// 把该源当前的 Cookie 一起推给服务端。
+  ///
+  /// 登录态常常**只存在于 Cookie 里**（ehentai 尤其明显：igneous +
+  /// ipb_member_id + ipb_pass_hash）。不同步 Cookie 的话，服务端拿到的
+  /// 账号数据是空壳，请求会被 302 到登录页，表现为 404/无权限。
+  void _enqueueCookies(String sourceKey, Map<String, dynamic> data) {
+    try {
+      final cookies =
+          NasCookieExport.exportForSource(sourceKey, Map.of(data));
+      if (cookies.isEmpty) return;
+      _pendingOps.add({
+        'type': 'source.cookie',
+        'payload': {'source': sourceKey, 'cookies': cookies},
+      });
+    } catch (e) {
+      Log.error('NAS Sync', 'export cookies for $sourceKey failed: $e');
+    }
   }
 
   String? _folderOf(FavoriteItem item) {
@@ -336,13 +360,19 @@ class NasSync with ChangeNotifier {
       for (final source in ComicSourceManager().all()) {
         final data = source.data;
         if (data.isEmpty) continue;
+        final plain = Map<String, dynamic>.from(data);
         ops.add({
           'type': 'source.data',
-          'payload': {
-            'source': source.key,
-            'data': Map<String, dynamic>.from(data),
-          },
+          'payload': {'source': source.key, 'data': plain},
         });
+        // 登录态常常只存在于 Cookie 里，必须一起推
+        final cookies = NasCookieExport.exportForSource(source.key, plain);
+        if (cookies.isNotEmpty) {
+          ops.add({
+            'type': 'source.cookie',
+            'payload': {'source': source.key, 'cookies': cookies},
+          });
+        }
       }
     } catch (e) {
       Log.error('NAS Sync', 'bootstrap: read source configs failed: $e');
@@ -410,26 +440,55 @@ class NasSync with ChangeNotifier {
   }
 
   /// 拉取完整快照（首次接入或游标过期时）。
+  ///
+  /// 这是「新设备装上就能看到收藏」的唯一入口，因此每一步都要能自证：
+  /// 失败不再是静默的（历史 bug：连接显示成功、收藏一条都没有，
+  /// 界面上完全看不出是哪一步断了）。
   Future<void> _pullSnapshot() async {
     final client = NasClient.instance;
     var dio = _dio(client);
     if (dio == null) return;
 
     var res = await dio.get('/api/v1/sync/snapshot');
-    if (res.statusCode != 200 || res.data is! Map) return;
+    if (res.statusCode != 200 || res.data is! Map) {
+      _lastError = 'snapshot failed: HTTP ${res.statusCode}';
+      Log.error('NAS Sync', _lastError!);
+      return;
+    }
     var snap = Map<String, dynamic>.from(res.data);
+
+    var applied = 0;
+    var failed = 0;
+    _firstApplyError = null;
 
     // 收藏：按文件夹同步
     var favs = snap['favorites'];
     if (favs is Map) {
       favs.forEach((folder, items) {
         if (items is! List) return;
+        final folderName = folder.toString();
         for (var it in items) {
           if (it is! Map) continue;
-          _applyRemoteFavorite(folder.toString(), Map<String, dynamic>.from(it));
+          final ok = _applyRemoteFavorite(
+            folderName,
+            Map<String, dynamic>.from(it),
+          );
+          if (ok) {
+            applied++;
+          } else {
+            failed++;
+          }
         }
       });
     }
+
+    Log.info(
+      'NAS Sync',
+      'snapshot applied: favorites=$applied failed=$failed '
+      'histories=${(snap['histories'] as List?)?.length ?? 0}'
+      '${_firstApplyError != null ? ' | first error: $_firstApplyError' : ''}',
+    );
+
     var cursor = (snap['cursor'] as num?)?.toInt();
     if (cursor != null) await client.updateCursor(cursor);
   }
@@ -495,16 +554,52 @@ class NasSync with ChangeNotifier {
     }
   }
 
-  void _applyRemoteFavorite(String folder, Map<String, dynamic> p) {
+  /// 应用一条远端收藏。返回是否成功写入本地。
+  bool _applyRemoteFavorite(String folder, Map<String, dynamic> p) {
     try {
-      var sourceKey = p['source']?.toString() ?? '';
-      var comicId = p['comicId']?.toString() ?? '';
-      if (sourceKey.isEmpty || comicId.isEmpty) return;
-      var source = ComicSource.find(sourceKey);
-      if (source == null) return; // 源未安装，跳过
+      // 字段名兼容：服务端的 Favorite 结构把漫画 id 序列化成 `id`
+      // （见 model.Comic 的 json tag），而操作日志 payload 里叫 `comicId`。
+      // 快照走前者、增量走后者，只读一个必然有一边全是空值——
+      // 这正是"449 条收藏全部失败但没有任何异常"的原因：
+      // 代码在早期 return false，而不是抛错。
+      var sourceKey = (p['source'] ?? p['sourceKey'])?.toString() ?? '';
+      var comicId =
+          (p['comicId'] ?? p['id'])?.toString() ?? '';
+      if (sourceKey.isEmpty || comicId.isEmpty) {
+        if (_firstApplyError == null) {
+          _firstApplyError =
+              'missing field: source=$sourceKey comicId=$comicId keys=${p.keys.join(",")}';
+        }
+        return false;
+      }
 
+      // 关键：**不要**因为"源未安装"就丢弃收藏。
+      //
+      // 这正是"新设备登录后收藏空白"的根因：平板刚装好 App、还没导入任何
+      // 漫画源，`ComicSource.find()` 一定返回 null。若此时跳过，
+      // 服务端明明有 993 条收藏，客户端却一条也不落地——
+      // 而收藏项自身已经带齐了 id/标题/封面/作者，渲染根本不需要源。
+      //
+      // 因此优先用 op payload 里服务端给的 sourceType（与手机端一致）；
+      // 拿不到时再用 sourceKey.hashCode 兜底（Dart 侧算法稳定）。
+      //
+      // 代价：源装好之后 `ComicType.value` 才能解析出真实源对象。
+      // 那之前收藏按"未知源"展示，但数据不会丢，装源后即刻恢复正常。
+      final typeHint = (p['sourceType'] as num?)?.toInt() ??
+          (p['sourceTypeHint'] as num?)?.toInt();
+
+      // 建文件夹时必须传 renameWhenInvalidName=false。
+      //
+      // 这个参数看着像"名字非法就改名"，实际语义是"**已存在就改名**"
+      // （见 LocalFavoritesManager.createFolder：existsFolder(name) 时
+      // 追加数字后缀）。同步场景下这会造成连锁失败：
+      //   第一次 Picacg 建好了 → 第二次 createFolder('Picacg', true)
+      //   把它改成 'Picacg0' → 紧接着 addComic('Picacg', …) 抛
+      //   "Folder does not exists" → 该条收藏丢失。
+      //
+      // 实测后果：449 条收藏一条都没落地（favorites=0 failed=449）。
       if (!LocalFavoritesManager().existsFolder(folder)) {
-        LocalFavoritesManager().createFolder(folder, true);
+        LocalFavoritesManager().createFolder(folder);
       }
       var tags = (p['tags'] as List?)?.map((e) => '$e').toList() ?? <String>[];
       var item = FavoriteItem(
@@ -512,12 +607,21 @@ class NasSync with ChangeNotifier {
         name: p['title']?.toString() ?? comicId,
         coverPath: p['cover']?.toString() ?? '',
         author: p['author']?.toString() ?? '',
-        type: ComicType(sourceKey.hashCode),
+        type: typeHint != null && typeHint != 0
+            ? ComicType(typeHint)
+            : ComicType(sourceKey.hashCode),
         tags: tags,
       );
       LocalFavoritesManager().addComic(folder, item, null, null);
-    } catch (e) {
-      Log.error('NAS Sync', 'apply remote favorite failed: $e');
+      return true;
+    } catch (e, st) {
+      // 记录**第一条**失败的具体原因：449 条全部失败时，
+      // 一条完整堆栈比 449 条同样的摘要有用得多。
+      if (_firstApplyError == null) {
+        _firstApplyError = '$e\n${st.toString().split('\n').take(4).join('\n')}';
+        Log.error('NAS Sync', 'first favorite apply failure: $_firstApplyError');
+      }
+      return false;
     }
   }
 
@@ -534,10 +638,16 @@ class NasSync with ChangeNotifier {
 
   void _applyRemoteHistory(Map<String, dynamic> p) {
     try {
-      var sourceKey = p['source']?.toString() ?? '';
-      if (ComicSource.find(sourceKey) == null) return;
-      var type = ComicType(sourceKey.hashCode);
-      var comicId = p['comicId']?.toString() ?? '';
+      var sourceKey = (p['source'] ?? p['sourceKey'])?.toString() ?? '';
+      if (sourceKey.isEmpty) return;
+      // 同 _applyRemoteFavorite：不要因为源未安装就丢弃阅读进度。
+      final typeHint = (p['sourceType'] as num?)?.toInt();
+      var type = typeHint != null && typeHint != 0
+          ? ComicType(typeHint)
+          : ComicType(sourceKey.hashCode);
+      // 字段名兼容：快照用 `id`，增量 payload 用 `comicId`。
+      var comicId = (p['comicId'] ?? p['id'])?.toString() ?? '';
+      if (comicId.isEmpty) return;
       var existing = HistoryManager().find(comicId, type);
       var remoteTime = (p['at'] as num?)?.toInt() ?? 0;
       // LWW：远端更新时间更旧就不覆盖本地

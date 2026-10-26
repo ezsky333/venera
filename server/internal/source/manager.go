@@ -313,11 +313,40 @@ func (m *Manager) withHost(key string, fn func(h *jshost.Host) error) error {
 		defer close(loopDone)
 		h.RunLoop()
 	}()
+	defer func() {
+		h.Close()
+		<-loopDone
+	}()
 
-	err = fn(h)
-	h.Close()
-	<-loopDone
-	return err
+	// 复刻 App 的 js_engine.init()：源实例化后先调用其 init()，
+	// 成功后才算可用。见 runInit。
+	if err := m.runInit(h); err != nil {
+		return err
+	}
+	return fn(h)
+}
+
+// runInit 调用源的 init() 钩子（若存在）。
+//
+// 这一步不是可选的装饰：jm/wnacg 这类源把域名列表放在 init() 里异步拉取，
+// 没跑 init 就直接 loadInfo，baseUrl getter 取到 undefined 下标，
+// 报的却是 "Cannot read property '1' of undefined"（真正的空指针在下标处）。
+//
+// 失败语义（与 App 一致）：
+//   - init 抛错 → 该源视为加载失败，调用方直接拿到错误；
+//   - 源没有 init 或 init 非函数 → 视为成功。
+func (m *Manager) runInit(h *jshost.Host) error {
+	v, err := h.Call(`(async () => {
+		const s = __source;
+		if (!s || typeof s.init !== "function") return "skip";
+		await s.init();
+		return "ok";
+	})()`)
+	if err != nil {
+		return fmt.Errorf("source init: %w", err)
+	}
+	_ = v
+	return nil
 }
 
 // ---------- 源方法封装 ----------

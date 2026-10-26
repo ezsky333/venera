@@ -183,10 +183,9 @@ class FileDownloader {
       }
       block.downloading = true;
       var task = _fetchBlock(block);
-      task.then((value) => tasks.remove(task), onError: (e) {
-        if(_canceled) return;
-        throw e;
-      });
+      // 用 whenComplete 清理，失败信息由 Future.wait 统一抛出，
+      // 避免在 then 的 onError 里既要返回值又要抛异常（类型冲突）。
+      task.whenComplete(() => tasks.remove(task));
       tasks.add(task);
     }
     await Future.wait(tasks);

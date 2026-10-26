@@ -74,7 +74,7 @@ class _NasSettingState extends State<NasSetting> {
             // ---- 地址 ----
             TextField(
               decoration: InputDecoration(
-                labelText: "Server URL",
+                labelText: "Server URL".tl,
                 hintText: "http://192.168.1.10:8080",
                 helperText: "The venera-nas service address".tl,
                 border: const OutlineInputBorder(),
@@ -88,7 +88,7 @@ class _NasSettingState extends State<NasSetting> {
             TextField(
               decoration: InputDecoration(
                 labelText: "Access Token (Optional)".tl,
-                hintText: "Bearer token configured on the server",
+                hintText: "Bearer token configured on the server".tl,
                 helperText: "Leave empty if the server does not require auth".tl,
                 border: const OutlineInputBorder(),
               ),
@@ -175,6 +175,36 @@ class _NasSettingState extends State<NasSetting> {
                   ),
                 ],
               ),
+              const SizedBox(height: 12),
+              // 下载管理与库浏览
+              Button.outlined(
+                onPressed: () {
+                  App.rootContext.to(() => const NasDownloadManager());
+                },
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Icon(Icons.download_outlined, size: 18),
+                    const SizedBox(width: 8),
+                    Text("NAS Downloads".tl),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 8),
+              Button.outlined(
+                onPressed: () {
+                  final url = '${NasClient.instance.config.baseUrl}/admin';
+                  launchUrlString(url);
+                },
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Icon(Icons.dns_outlined, size: 18),
+                    const SizedBox(width: 8),
+                    Text("Open NAS admin panel".tl),
+                  ],
+                ),
+              ),
               if (NasSync().lastError != null) ...[
                 const SizedBox(height: 12),
                 Text(
@@ -255,10 +285,24 @@ class _NasSettingState extends State<NasSetting> {
     await _refreshInfo();
     if (!mounted) return;
     context.showMessage(message: "Connected".tl);
+
+    // 关键顺序：**先**启动同步，再关闭页面。
+    //
+    // 反过来的写法（先 App.rootPop() 再 NasSync().syncNow()）有一个隐蔽的
+    // 致命问题：rootPop 在某些路由栈状态下会抛异常，一旦抛出，
+    // 后面的同步就永远不执行——现象是"显示已连接，但收藏一条都同步不过来"，
+    // 而界面上完全看不出错误。
+    //
+    // 同步本身不 await：它是后台任务，不该卡住页面关闭。
+    final syncFuture = NasSync().syncNow(full: true);
+
     App.rootPop();
 
-    // 后台同步，不阻塞 UI 关闭
-    NasSync().syncNow(full: true);
+    // pop 之后仍保留一份引用，避免 future 被 GC 前无人等待；
+    // 失败已经在 syncNow 内部记录到 lastError，这里只兜住未捕获异常。
+    unawaited(syncFuture.catchError((Object e) {
+      Log.error('NAS Sync', 'post-connect sync failed: $e');
+    }));
   }
 
   Future<void> _syncNow() async {

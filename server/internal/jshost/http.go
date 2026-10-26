@@ -2,6 +2,9 @@ package jshost
 
 import (
 	"bytes"
+	"compress/flate"
+	"compress/gzip"
+	"compress/zlib"
 	"context"
 	"fmt"
 	"io"
@@ -39,7 +42,37 @@ func DefaultClientWithProxy(pc ProxyConfig) *http.Client {
 	return &http.Client{
 		Transport: pc.transport(),
 		Timeout:   90 * time.Second,
+		// 默认策略会把跨域重定向一路跟到底，并返回**最终页面**。
+		// 对 exhentai 这种站点这会失控：
+		//   /g/<id>  (未登录 → 302)
+		//     → forums.e-hentai.org/remoteapi.php?ex=…
+		//       → 再次 302 → …（10 次后报 "stopped after 10 redirects"）
+		// 我们真正想要的是"告诉源：这个页面需要登录/不可访问"，
+		// 而不是让整个请求以传输层错误结束——源脚本无从判断状态码。
+		//
+		// 因此跨域重定向一律停在 3xx：把 302 原样交给源，
+		// 源手里的 `if (res.status !== 200) throw …` 才能给出可读的错误。
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return http.ErrUseLastResponse
+			}
+			if len(via) > 0 && !sameSite(via[0].URL, req.URL) {
+				return http.ErrUseLastResponse
+			}
+			return nil
+		},
 	}
+}
+
+// sameSite 判断两个 URL 是否属于同一站点（忽略子域差异）。
+//
+// 例：e-hentai.org ↔ forums.e-hentai.org 视为跨站，
+// 因为前者是画廊、后者是论坛，认证语义完全不同。
+func sameSite(a, b *url.URL) bool {
+	if a == nil || b == nil {
+		return true
+	}
+	return strings.EqualFold(a.Host, b.Host)
 }
 
 // jsHTTP 实现 Network.sendRequest / fetchBytes。
@@ -173,8 +206,20 @@ func (h *Host) jsHTTP(msg map[string]any) goja.Value {
 
 		limit := h.opts.MaxResponseBytes
 		reader := io.Reader(resp.Body)
+		// 源普遍会显式声明 `Accept-Encoding: gzip, deflate, br, zstd`（照抄浏览器），
+		// 但 Go 的 Transport 只在"自己加的"Accept-Encoding 时才自动解压。
+		// 源自己加的请求头会让 resp.Body 保持压缩态，于是 JSON.parse 读到二进制。
+		// 这里按 Content-Encoding 主动解压（br/zstd 没有标准库实现，交给源降级）。
+		if enc := resp.Header.Get("Content-Encoding"); enc != "" {
+			decoded, derr := decodeBody(enc, resp.Body)
+			if derr != nil {
+				h.post(func() { resolve(h.httpResult(0, nil, nil, "decompress "+enc+": "+derr.Error())) })
+				return
+			}
+			reader = decoded
+		}
 		if limit > 0 {
-			reader = io.LimitReader(resp.Body, limit+1)
+			reader = io.LimitReader(reader, limit+1)
 		}
 		data, err := io.ReadAll(reader)
 		if err != nil {
@@ -400,5 +445,31 @@ func (h *Host) jsCookie(msg map[string]any) goja.Value {
 
 // webUA 与 App 的 lib/foundation/consts.dart 保持一致。
 const webUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
+
+// decodeBody 按 Content-Encoding 解压响应体。
+//
+// 只处理标准库能覆盖的编码。br/zstd 通常出现在源"照抄浏览器请求头"
+// 却拿到压缩响应的场景；此时明确报错，比把二进制塞给 JSON.parse 更容易排查。
+func decodeBody(encoding string, body io.Reader) (io.Reader, error) {
+	switch strings.ToLower(strings.TrimSpace(encoding)) {
+	case "", "identity":
+		return body, nil
+	case "gzip", "x-gzip":
+		return gzip.NewReader(body)
+	case "deflate":
+		// 少数站点发原始 deflate 流而非 zlib 包装，先按 zlib 试，失败再裸解。
+		data, err := io.ReadAll(io.LimitReader(body, 64<<20))
+		if err != nil {
+			return nil, err
+		}
+		if zr, zerr := zlib.NewReader(bytes.NewReader(data)); zerr == nil {
+			return zr, nil
+		}
+		return flate.NewReader(bytes.NewReader(data)), nil
+	case "br", "zstd":
+		return nil, fmt.Errorf("unsupported encoding %q (remove it from the request's Accept-Encoding)", encoding)
+	}
+	return body, nil
+}
 
 var _ = sync.Once{}

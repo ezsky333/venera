@@ -318,12 +318,35 @@ func (s *Syncer) Pull(req PullRequest) (*PullResponse, error) {
 
 // Snapshot 是服务端当前状态的完整快照，用于客户端首次接入或游标过期后的重建。
 type Snapshot struct {
-	Favorites map[string][]model.Favorite `json:"favorites"`
-	Histories []model.History             `json:"histories"`
-	Settings  map[string]json.RawMessage  `json:"settings,omitempty"`
-	Sources   []store.SourceInfo          `json:"sources,omitempty"`
-	Cursor    int64                       `json:"cursor"`
-	At        time.Time                   `json:"at"`
+	Favorites map[string][]FavoriteView      `json:"favorites"`
+	Histories []HistoryView                  `json:"histories"`
+	Settings  map[string]json.RawMessage     `json:"settings,omitempty"`
+	Sources   []store.SourceInfo             `json:"sources,omitempty"`
+	Cursor    int64                          `json:"cursor"`
+	At        time.Time                      `json:"at"`
+}
+
+// FavoriteView 是发给客户端的收藏条目。
+//
+// 相比 model.Favorite 额外带两个字段：
+//   - sourceType：客户端在**尚未安装漫画源**时也要能把收藏正确落地
+//     （用的是同一套 hashCode，装源后自动对上）。
+//   - comicId：内嵌的 Comic 把 id 序列化成 `id`，但客户端在增量 op 里
+//     读的是 `comicId`。两个路径用不同名字是历史遗留，
+//     这里显式再给一份 `comicId`，让客户端两种写法都能用，
+//     避免"快照一条都应用不上"这种排查成本极高的 bug
+//     （真实发生过：449 条收藏全失败，且不抛异常）。
+type FavoriteView struct {
+	model.Favorite
+	SourceKey string `json:"sourceKey"`
+	ComicID   string `json:"comicId"`
+}
+
+// HistoryView 同理。
+type HistoryView struct {
+	model.History
+	SourceKey string `json:"sourceKey"`
+	ComicID   string `json:"comicId"`
 }
 
 // BuildSnapshot 生成完整快照。
@@ -333,17 +356,37 @@ func (s *Syncer) BuildSnapshot() (*Snapshot, error) {
 		return nil, err
 	}
 	snap := &Snapshot{
-		Favorites: map[string][]model.Favorite{},
+		Favorites: map[string][]FavoriteView{},
 		At:        time.Now(),
 	}
 	for _, f := range all {
-		snap.Favorites[f.Folder] = append(snap.Favorites[f.Folder], f)
+		st := f.SourceType
+		if st == 0 {
+			st = s.st.SourceType(f.Source, hashOf(f.Source))
+		}
+		f.SourceType = st
+		snap.Favorites[f.Folder] = append(snap.Favorites[f.Folder], FavoriteView{
+			Favorite:  f,
+			SourceKey: f.Source,
+			ComicID:   f.ID,
+		})
 	}
 	hist, err := s.st.ListHistories(500)
 	if err != nil {
 		return nil, err
 	}
-	snap.Histories = hist
+	for _, h := range hist {
+		st := h.SourceType
+		if st == 0 {
+			st = s.st.SourceType(h.Source, hashOf(h.Source))
+		}
+		h.SourceType = st
+		snap.Histories = append(snap.Histories, HistoryView{
+			History:   h,
+			SourceKey: h.Source,
+			ComicID:   h.ID,
+		})
+	}
 	settings, err := s.st.AllSettings()
 	if err != nil {
 		return nil, err

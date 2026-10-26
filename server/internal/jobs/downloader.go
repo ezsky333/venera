@@ -138,6 +138,8 @@ func (d *Downloader) RunJob(jobID int64, detail *model.ComicDetail) error {
 	}
 
 	total := len(targets)
+	var failedChapters []string
+	var lastErr error
 	for i, ch := range targets {
 		if cachedSet[ch.ID] {
 			d.logf("[%d/%d] skip cached chapter %s", i+1, total, ch.ID)
@@ -147,11 +149,30 @@ func (d *Downloader) RunJob(jobID int64, detail *model.ComicDetail) error {
 		_ = d.store.UpdateJob(jobID, model.JobRunning, progress,
 			fmt.Sprintf("downloading chapter %d/%d: %s", i+1, total, ch.Title), "")
 
+		// 单章失败不再中止整本。
+		//
+		// 一本 200 话的漫画若在第 3 话因为一次 EOF 就整体失败，
+		// 那么每次重试都要从头再来，永远也下载不完。
+		// 正确做法是记下失败章节继续往下下，最后按比例判定整本状态。
 		if err := d.downloadChapter(detail, ch, baseDir); err != nil {
-			msg := fmt.Sprintf("chapter %q failed: %v", ch.ID, err)
-			_ = d.store.UpdateJob(jobID, model.JobFailed, progress, "", msg)
-			return fmt.Errorf("%s", msg)
+			d.logf("[%d/%d] chapter %s failed: %v", i+1, total, ch.ID, err)
+			failedChapters = append(failedChapters, ch.ID)
+			lastErr = err
 		}
+	}
+
+	// 一章都没成功 → 整本失败（多半是源配置/登录问题，重试有意义）
+	if len(failedChapters) > 0 && len(failedChapters) >= len(targets) {
+		msg := fmt.Sprintf("all %d chapters failed (last: %v)", len(failedChapters), lastErr)
+		_ = d.store.UpdateJob(jobID, model.JobFailed, 0, "", msg)
+		return fmt.Errorf("%s", msg)
+	}
+	if len(failedChapters) > 0 {
+		// 部分成功：标记完成，但在 message 里留痕，便于管理面板展示
+		msg := fmt.Sprintf("complete with %d/%d chapters failed", len(failedChapters), len(targets))
+		d.logf("job %d: %s", jobID, msg)
+		_ = d.store.UpdateJob(jobID, model.JobDone, 1.0, msg, "")
+		return nil
 	}
 
 	_ = d.store.UpdateJob(jobID, model.JobDone, 1.0, "complete", "")
@@ -172,9 +193,22 @@ func (d *Downloader) saveCover(detail *model.ComicDetail, baseDir string) error 
 		}
 		headers = cfg.Headers
 	}
-	data, err := d.fetchImage(url, headers)
-	if err != nil {
-		return err
+
+	// 封面同样会被上游抖动影响；失败三次就放弃（封面缺失不影响阅读）
+	var data []byte
+	var lastErr error
+	for i := 0; i < 3; i++ {
+		data, lastErr = d.fetchImage(url, headers)
+		if lastErr == nil {
+			break
+		}
+		if !isRetriableImageError(lastErr.Error()) {
+			return lastErr
+		}
+		time.Sleep(time.Duration(300*(i+1)) * time.Millisecond)
+	}
+	if lastErr != nil {
+		return lastErr
 	}
 	ext := imageExt(data)
 	path := filepath.Join(baseDir, "cover"+ext)
@@ -222,7 +256,7 @@ func (d *Downloader) downloadChapter(detail *model.ComicDetail, ch model.Chapter
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			data, err := d.fetchWithConfig(detail, ch, imgURL, &cfgCache)
+			data, err := d.fetchImageWithRetry(detail, ch, imgURL, &cfgCache)
 			if err != nil {
 				results <- result{idx, err}
 				return
@@ -238,19 +272,27 @@ func (d *Downloader) downloadChapter(detail *model.ComicDetail, ch model.Chapter
 	wg.Wait()
 	close(results)
 
-	// 收敛错误（收集首个错误，其余仅计数）
+	// 收敛错误。注意这里**不**因为个别图片失败而放弃整章：
+	// 上游图片 CDN 抖动很常见（picacg 一次 200 页里挂 3 张是常态），
+	// 让整本 200 页白下载再全部重来，代价远高于容忍少量缺页。
+	// 缺页数量记在章节索引里，客户端遇到缺页会回落到在线源。
 	var firstErr error
-	failCount := 0
+	var failedIdx []int
 	for r := range results {
 		if r.err != nil {
-			failCount++
+			failedIdx = append(failedIdx, r.index)
 			if firstErr == nil {
 				firstErr = r.err
 			}
 		}
 	}
-	if failCount > 0 {
-		return fmt.Errorf("%d/%d images failed (first: %v)", failCount, len(urls), firstErr)
+	total := len(urls)
+	if len(failedIdx) > 0 {
+		d.logf("chapter %s: %d/%d images failed (first: %v)", ch.ID, len(failedIdx), total, firstErr)
+	}
+	// 超过容忍阈值才判定失败，避免把"几乎全没下到"当成成功
+	if len(failedIdx) > maxFailedImages(total) {
+		return fmt.Errorf("%d/%d images failed (first: %v)", len(failedIdx), total, firstErr)
 	}
 
 	// 统计大小
@@ -264,17 +306,71 @@ func (d *Downloader) downloadChapter(detail *model.ComicDetail, ch model.Chapter
 	}
 
 	rel, _ := filepath.Rel(d.store.LibraryDir(), dir)
+	pages := total - len(failedIdx)
 	return d.store.PutCachedChapter(model.CachedChapter{
 		Source:       detail.Source,
 		ComicID:      detail.ID,
 		ChapterID:    ch.ID,
 		ChapterTitle: ch.Title,
 		Dir:          filepath.ToSlash(rel),
-		PageCount:    len(urls),
+		PageCount:    pages,
 		Cover:        relativeTo(d.store.LibraryDir(), filepath.Join(baseDir, "cover.png")),
 		Bytes:        totalBytes,
 		CreatedAt:    time.Now(),
 	})
+}
+
+// maxFailedImages 是单章可容忍的缺页数。
+//
+// 取"总页数的 10%，且至少 2 页"，理由：
+//   - 图片 CDN 偶发单张失败不可避免，为此重下整本不划算；
+//   - 但缺页过多说明源/网络确实有问题，应让任务失败以便重试。
+func maxFailedImages(total int) int {
+	if total <= 0 {
+		return 0
+	}
+	n := total / 10
+	if n < 2 {
+		n = 2
+	}
+	return n
+}
+
+// fetchImageWithRetry 下载单张图片，对可重试错误做有限次退避重试。
+//
+// 实测：picacg 的 storage-b 与 jm 的几个 cdn 域会零星返回 EOF /
+// 空 body / HTML 错误页，隔几百毫秒重试基本都能成功。
+func (d *Downloader) fetchImageWithRetry(detail *model.ComicDetail, ch model.Chapter, imgURL string, cache *sync.Map) ([]byte, error) {
+	const attempts = 3
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		data, err := d.fetchWithConfig(detail, ch, imgURL, cache)
+		if err == nil {
+			return data, nil
+		}
+		lastErr = err
+		if !isRetriableImageError(err.Error()) {
+			return nil, err
+		}
+		// 0.4s / 0.8s 退避，避开上游瞬时抖动
+		time.Sleep(time.Duration(400*(i+1)) * time.Millisecond)
+	}
+	return nil, lastErr
+}
+
+// isRetriableImageError 判断图片下载失败是否值得重试。
+//
+// 图片层面几乎全部是瞬时问题：连接重置、超时、空响应、
+// 以及上游在限流时返回的 HTML 错误页（表现为解码失败）。
+// 404/403 这类确定性失败不重试。
+func isRetriableImageError(msg string) bool {
+	permanent := []string{"status 404", "status 403", "status 401", "status 410"}
+	for _, p := range permanent {
+		if strings.Contains(msg, p) {
+			return false
+		}
+	}
+	return true
 }
 
 // fetchWithConfig 获取单张图片，按源的 ImageLoadingConfig 处理变换。

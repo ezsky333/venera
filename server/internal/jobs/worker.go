@@ -159,6 +159,15 @@ func isRetriableError(msg string) bool {
 		"invalid login",
 		"401",
 		"403",
+		// 需要登录才能看的页面：exhentai 的 302 就是这种情况。
+		// 重试一万次也还是需要 Cookie，必须由客户端同步登录态来解决。
+		"Invalid status code: 302",
+		"Invalid status code: 404",
+		"Invalid Status Code 302",
+		"Invalid Status Code 404",
+		"stopped after 10 redirects",
+		"may not have permission",
+		"You may not have permission",
 	}
 	for _, p := range permanent {
 		if strings.Contains(msg, p) {
@@ -169,6 +178,11 @@ func isRetriableError(msg string) bool {
 		"timeout", "i/o timeout", "EOF", "connection reset",
 		"429", "500", "502", "503", "504",
 		"no such host", "TLS handshake",
+		// 上游限流/维护时会返回 HTML 错误页，源里的 JSON.parse 于是报
+		// "invalid character '<' looking for beginning of value"。
+		// 这属于临时故障，等一下往往就好了。
+		"invalid character '<'",
+		"Unexpected token <",
 	}
 	for _, p := range retriable {
 		if strings.Contains(msg, p) {

@@ -71,28 +71,51 @@ func (h *Host) jsHTML(msg map[string]any) goja.Value {
 		return goja.Undefined()
 	}
 
+	// ---- 定位文档 ----
+	//
+	// 两套调用的参数布局不同，必须分开判断，否则会静默查错文档：
+	//
+	//	HtmlDocument.methods  → { key: docKey }            （没有 doc 字段）
+	//	HtmlElement.methods   → { key: elemKey, doc: docKey }
+	//
+	// 旧实现先读 msg["doc"]，对文档级调用拿到 0，于是永远绑定到"文档 0"；
+	// 而 nodeKey 又是文档 key，doc.get(docKey) 命中的是第一个被 intern 的
+	// 元素而不是根节点 —— 结果查询范围被悄悄缩小到某棵子树：
+	// `#comicName`（兄弟节点）查不到，`div.sub_r`（子树内）却能查到。
 	docKey := toInt(msg["key"])
-	if fn == "getElementById" {
-		doc := h.getDoc(docKey)
-		if doc == nil {
-			return goja.Null()
-		}
-		return h.nullableID(doc.intern(findByID(doc.root, fmtStr(msg["id"]))))
-	}
-
 	doc := h.getDoc(toInt(msg["doc"]))
 	if doc == nil {
-		// 部分调用把文档 key 放在 key 上
 		doc = h.getDoc(docKey)
 	}
 	if doc == nil {
 		return goja.Null()
 	}
 
-	nodeKey := toInt(msg["key"])
-	node := doc.get(int(nodeKey))
-	if node == nil {
-		return goja.Null()
+	// 判定"这是文档级调用还是元素级调用"必须看字段**是否存在**，
+	// 不能看它的值：第一个创建的文档 key 恰好就是 0，
+	// 用 `doc == 0` 判断会把 "HtmlElement{key:0, doc:0}" 误认成文档级，
+	// 于是 `.text` 返回整个文档的文本（wnacg 的标题就是这么变成整页的）。
+	_, hasDoc := msg["doc"]
+	docLevel := !hasDoc
+
+	// getElementById 只在文档级有意义（HtmlDocument 上的方法），
+	// 且必须整体扫描根节点，不能落到上面算出来的 node 子树里。
+	if fn == "getElementById" {
+		if !docLevel {
+			return goja.Null()
+		}
+		return h.nullableID(doc.intern(findByID(doc.root, fmtStr(msg["id"]))))
+	}
+
+	var node *html.Node
+	if docLevel {
+		// 文档级：key 就是文档 key，查询从根节点开始
+		node = doc.root
+	} else {
+		node = doc.get(int(docKey))
+		if node == nil {
+			return goja.Null()
+		}
 	}
 
 	switch fn {
@@ -103,7 +126,6 @@ func (h *Host) jsHTML(msg map[string]any) goja.Value {
 	case "querySelectorAll", "dom_querySelectorAll":
 		els := querySelectorAll(node, fmtStr(msg["query"]))
 		return h.idArray(els, doc)
-
 	case "dom_querySelector":
 		el := querySelector(node, fmtStr(msg["query"]))
 		return h.nullableID(doc.intern(el))
@@ -447,6 +469,24 @@ func parseChain(sel string) []selectorStep {
 			if cur.Len() > 0 {
 				flush()
 			}
+		case '[':
+			// 属性选择器里的空格不是后代组合符：
+			// `[data-x="a b"]` / `[title=a b]` 若在空格处断开，
+			// 后半截会被当成 tag 名，整个选择器静默失效。
+			depth := 1
+			cur.WriteByte(c)
+			for i++; i < len(sel); i++ {
+				cur.WriteByte(sel[i])
+				if sel[i] == '[' {
+					depth++
+				}
+				if sel[i] == ']' {
+					depth--
+					if depth == 0 {
+						break
+					}
+				}
+			}
 		default:
 			cur.WriteByte(c)
 		}
@@ -541,6 +581,8 @@ func stepMatches(n *html.Node, st selectorStep) bool {
 	if n.Type != html.ElementNode {
 		return false
 	}
+	// id / class 都是区分大小写的（CSS 规范如此，源脚本也这么写），
+	// 但注意：属性名不区分大小写，x/net/html 又已经做了小写归一。
 	if st.tag != "" && st.tag != "*" && strings.ToLower(n.Data) != st.tag {
 		return false
 	}
