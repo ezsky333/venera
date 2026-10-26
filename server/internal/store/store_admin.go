@@ -234,6 +234,9 @@ func (s *Store) ChaptersOf(source, comicID string) ([]map[string]any, error) {
 			"createdAt": time.UnixMilli(created).Format(time.RFC3339),
 		})
 	}
+	if out == nil {
+		out = []map[string]any{}
+	}
 	return out, rows.Err()
 }
 

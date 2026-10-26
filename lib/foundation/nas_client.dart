@@ -827,3 +827,52 @@ class NasClient {
     return id;
   }
 }
+
+/// 收藏夹角标用的"NAS 已缓存漫画"索引。
+///
+/// 收藏夹列表可能有近千项，逐项查服务端显然不行；
+/// 这里一次拉全库（source/comicId 对），内存里建 Set，UI 直接查。
+/// 数据 60 秒过期——角标是辅助信息，不需要强一致。
+class NasLibraryIndex {
+  NasLibraryIndex._();
+
+  static final NasLibraryIndex instance = NasLibraryIndex._();
+
+  Set<String> _keys = {};
+  DateTime _loadedAt = DateTime.fromMillisecondsSinceEpoch(0);
+  bool _loading = false;
+
+  static const _ttl = Duration(seconds: 60);
+
+  bool _enabled() => NasClient.instance.isEnabled;
+
+  /// 查询某本漫画是否已在 NAS 上缓存。
+  bool contains(String sourceKey, String comicId) {
+    if (!_enabled() || _keys.isEmpty) return false;
+    return _keys.contains('$sourceKey\x00$comicId');
+  }
+
+  /// 确保索引已加载（过期自动重拉）。失败静默——角标不能阻塞列表。
+  Future<void> ensure() async {
+    if (!_enabled() || _loading) return;
+    if (DateTime.now().difference(_loadedAt) < _ttl) return;
+    _loading = true;
+    try {
+      final items = await NasClient.instance.library();
+      _keys = items
+          .where((e) => e.source.isNotEmpty && e.comicId.isNotEmpty)
+          .map((e) => '${e.source}\x00${e.comicId}')
+          .toSet();
+      _loadedAt = DateTime.now();
+    } catch (_) {
+      // 静默：角标属增强信息
+    } finally {
+      _loading = false;
+    }
+  }
+
+  /// 数据可能变化时（下载完成等）手动失效。
+  void invalidate() {
+    _loadedAt = DateTime.fromMillisecondsSinceEpoch(0);
+  }
+}

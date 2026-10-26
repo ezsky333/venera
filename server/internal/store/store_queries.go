@@ -574,7 +574,7 @@ func (s *Store) ClaimNextJob() (*model.Job, error) {
 	var attempts sql.NullInt64
 	err = tx.QueryRow(
 		`SELECT id, source, comic_id, title, chapters, status, progress, message, error, origin, created_at, updated_at, attempts
-		 FROM jobs WHERE status = 'pending' ORDER BY id ASC LIMIT 1`,
+		 FROM jobs WHERE status = 'pending' ORDER BY COALESCE(priority,0) DESC, id ASC LIMIT 1`,
 	).Scan(&j.ID, &j.Source, &j.ComicID, &title, &chapters, &j.Status, &j.Progress,
 		&message, &errMsg, &origin, &created, &updated, &attempts)
 	if err == sql.ErrNoRows {
@@ -611,12 +611,12 @@ func (s *Store) UpdateJob(id int64, status model.JobStatus, progress float64, me
 func (s *Store) GetJob(id int64) (*model.Job, error) {
 	j := &model.Job{}
 	var chapters, title, message, errMsg, origin sql.NullString
-	var created, updated, attempts sql.NullInt64
+	var created, updated, attempts, priority sql.NullInt64
 	err := s.db.QueryRow(
-		`SELECT id, source, comic_id, title, chapters, status, progress, message, error, origin, created_at, updated_at, attempts
+		`SELECT id, source, comic_id, title, chapters, status, progress, message, error, origin, created_at, updated_at, attempts, COALESCE(priority,0)
 		 FROM jobs WHERE id = ?`, id,
 	).Scan(&j.ID, &j.Source, &j.ComicID, &title, &chapters, &j.Status, &j.Progress,
-		&message, &errMsg, &origin, &created, &updated, &attempts)
+		&message, &errMsg, &origin, &created, &updated, &attempts, &priority)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -628,50 +628,64 @@ func (s *Store) GetJob(id int64) (*model.Job, error) {
 	j.Error = errMsg.String
 	j.Origin = origin.String
 	j.Attempts = int(attempts.Int64)
+	j.Priority = int(priority.Int64)
 	j.CreatedAt = time.UnixMilli(created.Int64)
 	j.UpdatedAt = time.UnixMilli(updated.Int64)
 	_ = json.Unmarshal([]byte(chapters.String), &j.Chapters)
 	return j, nil
 }
 
-func (s *Store) ListJobs(status string, limit int) ([]model.Job, error) {
+func (s *Store) ListJobs(status string, limit, offset int) ([]model.Job, int, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
-	q := `SELECT id, source, comic_id, title, chapters, status, progress, message, error, origin, created_at, updated_at, attempts FROM jobs`
+	where := ""
 	var args []any
 	if status != "" {
-		q += ` WHERE status = ?`
-		args = append(args, status)
+		// 兼容面板旧的 "active" 语义：同时取 pending+running
+		if status == "active" {
+			where = ` WHERE status IN ('pending','running')`
+		} else {
+			where = ` WHERE status = ?`
+			args = append(args, status)
+		}
 	}
-	q += ` ORDER BY id DESC LIMIT ?`
-	args = append(args, limit)
+
+	var total int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM jobs`+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	q := `SELECT id, source, comic_id, title, chapters, status, progress, message, error, origin, created_at, updated_at, attempts, COALESCE(priority,0) FROM jobs` +
+		where + ` ORDER BY priority DESC, id ASC LIMIT ? OFFSET ?`
+	args = append(args, limit, offset)
 
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
-	var out []model.Job
+	out := []model.Job{}
 	for rows.Next() {
 		var j model.Job
 		var chapters, title, message, errMsg, origin sql.NullString
-		var created, updated, attempts sql.NullInt64
+		var created, updated, attempts, priority sql.NullInt64
 		if err := rows.Scan(&j.ID, &j.Source, &j.ComicID, &title, &chapters, &j.Status, &j.Progress,
-			&message, &errMsg, &origin, &created, &updated, &attempts); err != nil {
-			return nil, err
+			&message, &errMsg, &origin, &created, &updated, &attempts, &priority); err != nil {
+			return nil, 0, err
 		}
 		j.Title = title.String
 		j.Message = message.String
 		j.Error = errMsg.String
 		j.Origin = origin.String
 		j.Attempts = int(attempts.Int64)
+		j.Priority = int(priority.Int64)
 		j.CreatedAt = time.UnixMilli(created.Int64)
 		j.UpdatedAt = time.UnixMilli(updated.Int64)
 		_ = json.Unmarshal([]byte(chapters.String), &j.Chapters)
 		out = append(out, j)
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
 }
 
 // RequeueStaleJobs 把服务重启时处于 running 的任务放回队列。
@@ -722,6 +736,106 @@ func (s *Store) RetryFailedJobs(source string) (int64, error) {
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+// ---------- 任务管理操作（面板用） ----------
+
+// PauseJob 暂停任务。pending → paused 立即生效；running 的任务
+// 只打上暂停标记，worker 在章节间隙检查标记后把它放回 paused。
+func (s *Store) PauseJob(id int64) (string, error) {
+	now := time.Now().UnixMilli()
+	res, err := s.db.Exec(
+		`UPDATE jobs SET status = 'paused', message = 'paused by user', updated_at = ?
+		 WHERE id = ? AND status = 'pending'`, now, id)
+	if err != nil {
+		return "", err
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		return "paused", nil
+	}
+	// running：标记 message，worker 周期检查（UpdateJob 若已带 paused 标记不覆盖）
+	res, err = s.db.Exec(
+		`UPDATE jobs SET message = 'pause requested', updated_at = ?
+		 WHERE id = ? AND status = 'running'`, now, id)
+	if err != nil {
+		return "", err
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		return "pause-requested", nil
+	}
+	return "", nil
+}
+
+// ResumeJob 把暂停的任务放回队列。
+func (s *Store) ResumeJob(id int64) (bool, error) {
+	res, err := s.db.Exec(
+		`UPDATE jobs SET status = 'pending', message = 'resumed', updated_at = ?
+		 WHERE id = ? AND status = 'paused'`, time.Now().UnixMilli(), id)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// SetJobPriority 设置任务优先级（置顶 = 1，取消置顶 = 0）。仅 pending/paused 可调。
+func (s *Store) SetJobPriority(id int64, priority int) (bool, error) {
+	res, err := s.db.Exec(
+		`UPDATE jobs SET priority = ?, updated_at = ?
+		 WHERE id = ? AND status IN ('pending','paused')`,
+		priority, time.Now().UnixMilli(), id)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// CancelJob 取消任务。pending/paused 直接置 cancelled；
+// running 的情况由调用方（worker 侧）通过状态检查自然终止——
+// UpdateJob 在状态已不是 running 时会拒绝写入（见 Worker 端 pause 检查）。
+func (s *Store) CancelJob(id int64) (bool, error) {
+	res, err := s.db.Exec(
+		`UPDATE jobs SET status = 'cancelled', message = 'cancelled by user', updated_at = ?
+		 WHERE id = ? AND status IN ('pending','paused')`,
+		time.Now().UnixMilli(), id)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// RetryJob 把单个失败/取消的任务重新排队。
+func (s *Store) RetryJob(id int64) (bool, error) {
+	res, err := s.db.Exec(
+		`UPDATE jobs SET status = 'pending', progress = 0, message = 'retry',
+		        error = '', updated_at = ?
+		 WHERE id = ? AND status IN ('failed','cancelled')`,
+		time.Now().UnixMilli(), id)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// JobIDsByStatus 列出某状态的全部任务 id（批量操作用）。
+func (s *Store) JobIDsByStatus(status string) ([]int64, error) {
+	rows, err := s.db.Query(`SELECT id FROM jobs WHERE status = ? ORDER BY id`, status)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
 }
 
 // ---------- source registry ----------

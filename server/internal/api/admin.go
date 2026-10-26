@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/venera-app/venera-nas/internal/model"
 	"github.com/venera-app/venera-nas/internal/store"
 )
 
@@ -55,6 +56,11 @@ func (s *Server) handleAdminLibrary(w http.ResponseWriter, r *http.Request) {
 		} else {
 			items[i].Cover = ""
 		}
+	}
+	// items 为空时给空数组而不是 null：面板的 data.items.map 遇到 null
+	// 会抛 "Cannot read properties of null (reading 'map')"，切页直接报错。
+	if items == nil {
+		items = []store.LibraryItem{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items": items, "total": total, "limit": limit, "offset": offset,
@@ -169,18 +175,28 @@ func (s *Server) handleAdminDeleteChapter(w http.ResponseWriter, r *http.Request
 }
 
 // handleAdminJobs 返回任务列表（面板的下载进度视图）。
+//
+// 支持分页与状态筛选；jobs 表为空时也返回空数组而非 null，
+// 面板的 list.map 才不会抛 "Cannot read properties of null"。
 func (s *Server) handleAdminJobs(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 	if limit <= 0 {
-		limit = 200
+		limit = 50
 	}
-	list, err := s.st.ListJobs(status, limit)
+	list, total, err := s.st.ListJobs(status, limit, offset)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"jobs": list})
+	if list == nil {
+		list = []model.Job{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"jobs": list, "items": list,
+		"total": total, "limit": limit, "offset": offset,
+	})
 }
 
 // handleAdminComic 返回漫画的缓存详情 + 元信息（面板预览用）。

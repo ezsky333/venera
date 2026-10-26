@@ -86,6 +86,7 @@ type JobStatus string
 const (
 	JobPending   JobStatus = "pending"
 	JobRunning   JobStatus = "running"
+	JobPaused    JobStatus = "paused"
 	JobDone      JobStatus = "done"
 	JobFailed    JobStatus = "failed"
 	JobCancelled JobStatus = "cancelled"
@@ -107,6 +108,8 @@ type Job struct {
 	Origin string `json:"origin,omitempty"`
 	// Attempts 已执行次数，用于限制自动重试（0 表示从未执行）。
 	Attempts  int       `json:"attempts,omitempty"`
+	// Priority 高的任务先被领取（面板"置顶"）。0 = 普通，1 = 置顶。
+	Priority  int       `json:"priority,omitempty"`
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
 }

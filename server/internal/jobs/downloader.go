@@ -201,6 +201,16 @@ func (d *Downloader) RunJob(jobID int64, detail *model.ComicDetail) error {
 	var failedChapters []string
 	var lastErr error
 	for i, ch := range targets {
+		// ---- 用户暂停请求检查 ----
+		//
+		// 面板的"暂停"对 running 任务只写 message 标记（SQLite 状态位
+		// 不能在下载中途强改，否则 worker 会把进度盖回去）。
+		// 在章节间隙检查一次，让暂停最多等一章的时间生效。
+		if j, err := d.store.GetJob(jobID); err == nil && j != nil && j.Message == "pause requested" {
+			_ = d.store.UpdateJob(jobID, model.JobPaused, float64(i)/float64(total),
+				fmt.Sprintf("paused at chapter %d/%d", i+1, total), "")
+			return nil
+		}
 		if cachedSet[ch.ID] {
 			d.logf("[%d/%d] skip cached chapter %s", i+1, total, ch.ID)
 			continue

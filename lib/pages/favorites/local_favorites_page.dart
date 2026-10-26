@@ -192,6 +192,11 @@ class _LocalFavoritesPageState extends State<_LocalFavoritesPage> {
     comics = [];
     updateComics();
     LocalFavoritesManager().addListener(updateComics);
+    // NAS 缓存角标：异步拉索引，到位后刷新一次。
+    // 失败/未配置 NAS 都静默，不影响列表本身。
+    NasLibraryIndex.instance.ensure().then((_) {
+      if (mounted) setState(() {});
+    });
     super.initState();
   }
 
@@ -990,9 +995,13 @@ class _ReorderComicsPageState extends State<_ReorderComicsPage> {
     var tiles = comics.map(
       (e) {
         var comicSource = e.type.comicSource;
+        // NAS 缓存角标：这本漫画已缓存在 NAS 上时显示"NAS"。
+        // 查询是内存 Set，几百项也不卡。
+        final nasCached = NasLibraryIndex.instance.contains(e.sourceKey, e.id);
         return ComicTile(
           key: Key(e.hashCode.toString()),
           enableLongPressed: false,
+          badge: nasCached ? "NAS" : null,
           comic: Comic(
             e.name,
             e.coverPath,

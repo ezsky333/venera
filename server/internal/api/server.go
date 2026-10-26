@@ -109,8 +109,10 @@ func (s *Server) Handler() http.Handler {
 	// 补抓存量封面：只下载缺失的 cover，不动已有内页
 	api.HandleFunc("POST /api/v1/download/covers", s.handleRefetchCovers)
 	api.HandleFunc("GET /api/v1/jobs", s.handleJobs)
+	api.HandleFunc("GET /api/v1/jobs/events", s.handleJobsEvents)
+	api.HandleFunc("POST /api/v1/jobs/bulk", s.handleJobsBulk)
 	api.HandleFunc("GET /api/v1/jobs/{id}", s.handleJob)
-	api.HandleFunc("POST /api/v1/jobs/{id}/cancel", s.handleCancelJob)
+	api.HandleFunc("POST /api/v1/jobs/{id}/{action}", s.handleJobAction)
 	api.HandleFunc("POST /api/v1/jobs/retry", s.handleRetryFailed)
 
 	api.HandleFunc("GET /api/v1/sources", s.handleSources)
@@ -184,6 +186,15 @@ type statusWriter struct {
 	http.ResponseWriter
 	status int
 	wrote  bool
+}
+
+// Flush 透传底层 Flusher：SSE（/api/v1/jobs/events）依赖它做流式推送。
+// ResponseWriter 被包装后接口集会缩小，不显式实现 Flush 的话
+// handler 侧的类型断言会失败，SSE 直接退化为 500。
+func (w *statusWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 func (w *statusWriter) WriteHeader(code int) {
@@ -693,12 +704,16 @@ func (s *Server) handleRefetchCovers(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	list, err := s.st.ListJobs(status, limit)
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	list, total, err := s.st.ListJobs(status, limit, offset)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"jobs": list})
+	if list == nil {
+		list = []model.Job{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"jobs": list, "total": total})
 }
 
 func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
@@ -725,8 +740,18 @@ func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid id"})
 		return
 	}
-	if err := s.st.UpdateJob(id, model.JobCancelled, 0, "cancelled by user", ""); err != nil {
+	ok, err := s.st.CancelJob(id)
+	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	if !ok {
+		job, _ := s.st.GetJob(id)
+		st := ""
+		if job != nil {
+			st = string(job.Status)
+		}
+		writeJSON(w, http.StatusConflict, map[string]any{"error": "cannot cancel job in status " + st})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"cancelled": true})

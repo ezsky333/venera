@@ -67,7 +67,7 @@ const adminHTML = `<!doctype html>
   .row select,.row input{padding:7px 10px;border-radius:7px;border:1px solid var(--line);
                          background:var(--panel2);color:var(--fg)}
   dialog{background:var(--panel);color:var(--fg);border:1px solid var(--line);
-         border-radius:12px;padding:0;max-width:820px;width:92vw}
+         border-radius:12px;padding:0;max-width:1000px;width:94vw}
   dialog::backdrop{background:rgba(0,0,0,.6)}
   .dlg-h{display:flex;justify-content:space-between;align-items:center;
          padding:14px 18px;border-bottom:1px solid var(--line)}
@@ -221,7 +221,7 @@ async function loadLibrary(reset) {
   const data = await api('/api/v1/admin/library?limit=40&offset=' + libOffset +
                          (libSource ? '&source=' + encodeURIComponent(libSource) : ''));
 
-  const rows = data.items.map(it => el('tr', null,
+  const rows = (data.items || []).map(it => el('tr', null,
     el('td', null, it.cover ? el('img', {class:'cover', src:it.cover, loading:'lazy',
       onerror: function(){ this.style.visibility='hidden'; }}) : el('div', {class:'cover'})),
     el('td', null,
@@ -243,7 +243,9 @@ async function loadLibrary(reset) {
       el('th', null, '封面'), el('th', null, '标题'), el('th', null, '章节'),
       el('th', null, '页数'), el('th', null, '大小'), el('th', null, '更新时间'), el('th', null, '操作'))),
     el('tbody', null, rows.length ? rows : el('tr', null, el('td', {colspan:7},
-      el('div', {class:'empty'}, '库里还没有漫画。等下载任务完成后刷新。'))))
+      el('div', {class:'empty'}, libSource
+        ? '该来源下没有已缓存的漫画。' + (libOffset > 0 ? '' : '换一个来源，或等下载任务完成后刷新。')
+        : '库里还没有漫画。等下载任务完成后刷新。'))))
   );
 
   const pager = el('div', {class:'row', style:'margin-top:14px'},
@@ -257,13 +259,43 @@ async function loadLibrary(reset) {
   const srcSel = el('select', {onchange: (e) => { libSource = e.target.value; loadLibrary(true); }},
     el('option', {value: ''}, '全部来源'));
   const st = await api('/api/v1/sources');
-  for (const s of st.sources) {
+  for (const s of (st.sources || [])) {
     const o = el('option', {value: s.key}, s.name + ' (' + s.key + ')');
     if (s.key === libSource) o.selected = true;
     srcSel.append(o);
   }
 
   root.replaceChildren(el('div', {class:'row'}, srcSel), table, pager);
+}
+
+// 点击章节 → 内嵌阅读视图：拉 /api/v1/chapter 的页 URL 列表，逐页展示。
+async function previewChapter(it, ch) {
+  const body = $('#dlg-body');
+  body.replaceChildren(
+    el('div', {class:'row'},
+      el('button', {class:'btn', onclick: () => showComic(it)}, '← 返回'),
+      el('strong', null, ch.title || ch.chapterId),
+      el('span', {class:'muted'}, (ch.pages || 0) + ' 页'))
+  );
+  const wrap = el('div', {style:'margin-top:12px'});
+  body.append(wrap);
+  try {
+    const d = await api('/api/v1/chapter?source=' + encodeURIComponent(it.source) +
+      '&comicId=' + encodeURIComponent(it.comicId) +
+      '&chapterId=' + encodeURIComponent(ch.chapterId));
+    if (!d.cached || !(d.pages || []).length) {
+      wrap.append(el('div', {class:'empty'}, '这一章在 NAS 上没有缓存页面。'));
+      return;
+    }
+    for (const p of d.pages) {
+      const img = el('img', {src: p, loading: 'lazy',
+        style: 'display:block;width:100%;max-width:900px;margin:0 auto 8px;border-radius:6px;background:var(--panel2)',
+        onerror: function(){ this.style.background='var(--err)'; this.alt='加载失败'; }});
+      wrap.append(img);
+    }
+  } catch (e) {
+    wrap.append(el('div', {class:'empty'}, '加载失败：' + e.message));
+  }
 }
 
 async function showComic(it) {
@@ -279,24 +311,38 @@ async function showComic(it) {
   if (d.tags && d.tags.length) body.append(el('div', {class:'muted', style:'margin-top:6px'}, d.tags.join(' · ')));
   body.append(el('div', {style:'clear:both;height:14px'}));
 
+  // 缓存概况：章节/页数/体积来自库列表行，弹窗里再给一条摘要
+  body.append(el('div', {class:'muted', style:'margin-bottom:8px'},
+    '缓存概况：' + it.chapters + ' 章 · ' + it.pages + ' 页 · ' + fmtBytes(it.bytes) +
+    ' · 更新于 ' + fmtTime(it.updatedAt)));
+
   const chs = d.chapters || [];
-  body.append(el('div', {class:'muted', style:'margin-bottom:8px'}, '已缓存 ' + chs.length + ' 章'));
+  body.append(el('div', {class:'muted', style:'margin-bottom:8px'},
+    '已缓存 ' + chs.length + ' 章（点章节名可在线预览）'));
   const t = el('table', null,
     el('thead', null, el('tr', null,
       el('th', null, '章节'), el('th', null, '页数'), el('th', null, '大小'),
       el('th', null, '时间'), el('th', null, '操作'))),
     el('tbody', null, chs.map(c => el('tr', null,
-      el('td', null, c.title || c.chapterId),
-      el('td', null, c.pages === 0 ? el('span', {class:'badge warn'}, '空') : String(c.pages)),
+      el('td', null,
+        (c.pages === 0
+          ? el('span', {class:'badge warn'}, '空 ')
+          : el('a', {href:'#', onclick: (e) => { e.preventDefault(); previewChapter(it, c); }},
+             c.title || c.chapterId)))),
+      el('td', null, String(c.pages)),
       el('td', null, fmtBytes(c.bytes)),
       el('td', {class:'muted'}, fmtTime(c.createdAt)),
-      el('td', null, el('button', {class:'btn danger', onclick: async () => {
-        await api('/api/v1/admin/chapter/delete', {method:'POST', body: JSON.stringify({
-          source: it.source, comicId: it.comicId, chapterId: c.chapterId
-        })});
-        showComic(it);
-        loadLibrary();
-      }}, '删除'))
+      el('td', null,
+        c.pages > 0 ? el('button', {class:'btn', onclick: () => previewChapter(it, c)}, '阅读') : null,
+        ' ',
+        el('button', {class:'btn danger', onclick: async () => {
+          if (!confirm('删除章节《' + (c.title || c.chapterId) + '》的缓存？')) return;
+          await api('/api/v1/admin/chapter/delete', {method:'POST', body: JSON.stringify({
+            source: it.source, comicId: it.comicId, chapterId: c.chapterId
+          })});
+          showComic(it);
+          loadLibrary();
+        }}, '删除'))
     )))
   );
   body.append(t);
@@ -312,51 +358,139 @@ async function deleteComic(it) {
 }
 
 // ---------- 任务 ----------
-async function loadJobs() {
+let jobOffset = 0, jobStatus = '', jobTotal = 0;
+const JOB_PAGE = 50;
+
+async function loadJobs(reset) {
+  if (reset) jobOffset = 0;
   const root = $('#tab-jobs');
-  const data = await api('/api/v1/admin/jobs?limit=200');
+  const data = await api('/api/v1/admin/jobs?limit=' + JOB_PAGE + '&offset=' + jobOffset +
+                         (jobStatus ? '&status=' + encodeURIComponent(jobStatus) : ''));
   const list = data.jobs || [];
+  jobTotal = data.total || list.length;
 
   const cls = (s) => s === 'done' ? 'ok' : s === 'failed' ? 'err'
-                   : s === 'running' ? 'run' : 'warn';
+                   : s === 'running' ? 'run'
+                   : s === 'paused' || s === 'cancelled' ? 'warn' : '';
   const label = (s) => ({done:'完成', failed:'失败', running:'下载中',
-                          pending:'等待中', cancelled:'已取消'}[s] || s);
+                          pending:'等待中', paused:'已暂停', cancelled:'已取消'}[s] || s);
 
-  const rows = list.map(j => el('tr', null,
-    el('td', {class:'muted'}, '#' + j.id),
-    el('td', null, j.source),
-    el('td', null,
-      el('div', {}, j.title || j.comicId),
-      j.error ? el('div', {class:'muted', style:'color:var(--err)'},
-        String(j.error).slice(0, 120)) : null),
-    el('td', null, el('span', {class:'badge ' + cls(j.status)}, label(j.status))),
-    el('td', null,
-      el('div', {class:'muted'}, Math.round((j.progress || 0) * 100) + '%'),
-      el('div', {class:'bar'}, el('i', {style:'width:' + Math.round((j.progress||0)*100) + '%'}))),
-    el('td', {class:'muted'}, j.message || '—')
-  ));
+  const rows = list.map(j => {
+    const canPause = j.status === 'pending' || j.status === 'running';
+    const canResume = j.status === 'paused';
+    const canCancel = j.status === 'pending' || j.status === 'paused';
+    const canRetry = j.status === 'failed' || j.status === 'cancelled';
+    const p = Math.round((j.progress || 0) * 100);
+    return el('tr', null,
+      el('td', {class:'muted'},
+        (j.priority ? '📌 ' : '') + '#' + j.id),
+      el('td', null, j.source),
+      el('td', null,
+        el('div', {}, j.title || j.comicId),
+        j.error ? el('div', {class:'muted', style:'color:var(--err)'},
+          String(j.error).slice(0, 120)) : null),
+      el('td', null, el('span', {class:'badge ' + cls(j.status)}, label(j.status))),
+      el('td', null,
+        el('div', {class:'muted'}, p + '%'),
+        el('div', {class:'bar'}, el('i', {style:'width:' + p + '%'}))),
+      el('td', {class:'muted'}, j.message || '—'),
+      el('td', null,
+        canPause ? el('button', {class:'btn', onclick: () => jobAction(j.id, 'pause')}, '暂停') : null,
+        canResume ? el('button', {class:'btn', onclick: () => jobAction(j.id, 'resume')}, '继续') : null,
+        j.status === 'pending' ? el('button', {class:'btn',
+          onclick: () => jobAction(j.id, j.priority ? 'untop' : 'top')},
+          j.priority ? '取消置顶' : '置顶') : null,
+        canCancel ? el('button', {class:'btn danger', onclick: () => jobAction(j.id, 'cancel')}, '取消') : null,
+        canRetry ? el('button', {class:'btn', onclick: () => jobAction(j.id, 'retry')}, '重试') : null)
+    );
+  });
+
+  const statusSel = el('select', {onchange: (e) => { jobStatus = e.target.value; loadJobs(true); }},
+    ...[['', '全部状态'], ['pending', '等待中'], ['running', '下载中'], ['paused', '已暂停'],
+        ['done', '完成'], ['failed', '失败'], ['cancelled', '已取消']].map(([v, t]) => {
+      const o = el('option', {value: v}, t);
+      if (v === jobStatus) o.selected = true;
+      return o;
+    }));
+
+  const pager = el('div', {class:'row', style:'margin-top:14px'},
+    el('button', {class:'btn', disabled: jobOffset === 0 ? '' : null,
+      onclick: () => { jobOffset = Math.max(0, jobOffset - JOB_PAGE); loadJobs(); }}, '上一页'),
+    el('span', {class:'muted'},
+      (jobOffset + 1) + '–' + Math.min(jobOffset + JOB_PAGE, jobTotal) + ' / ' + jobTotal),
+    el('button', {class:'btn', disabled: jobOffset + JOB_PAGE >= jobTotal ? '' : null,
+      onclick: () => { jobOffset += JOB_PAGE; loadJobs(); }}, '下一页'),
+    el('span', {class:'muted', style:'margin-left:auto', id:'sse-state'}, '')
+  );
 
   root.replaceChildren(
     el('div', {class:'row'},
+      statusSel,
       el('button', {class:'btn', onclick: async () => {
-        await api('/api/v1/download/favorites', {method:'POST', body:'{}'});
-        setStatus('已把收藏夹重新入队', 'ok');
-        setTimeout(loadJobs, 800);
-      }}, '把收藏加入下载队列'),
+        if (!confirm('把所有等待中的任务暂停？')) return;
+        await api('/api/v1/jobs/bulk', {method:'POST', body:'{"action":"pause-all"}'});
+        loadJobs(true);
+      }}, '全部暂停'),
       el('button', {class:'btn', onclick: async () => {
-        const r = await api('/api/v1/jobs/retry', {method:'POST', body:'{}'});
-        setStatus('重新排队 ' + r.requeued + ' 个失败任务', 'ok');
-        setTimeout(loadJobs, 800);
+        await api('/api/v1/jobs/bulk', {method:'POST', body:'{"action":"resume-all"}'});
+        loadJobs(true);
+      }}, '全部继续'),
+      el('button', {class:'btn', onclick: async () => {
+        const r = await api('/api/v1/jobs/bulk', {method:'POST', body:'{"action":"retry-failed"}'});
+        setStatus('重新排队 ' + r.affected + ' 个失败任务', 'ok');
+        loadJobs(true);
       }}, '重试失败任务'),
-      el('button', {class:'btn', onclick: loadJobs}, '刷新')
+      el('button', {class:'btn', onclick: () => loadJobs(true)}, '刷新')
     ),
     el('table', null,
       el('thead', null, el('tr', null,
         el('th', null, 'ID'), el('th', null, '源'), el('th', null, '漫画'),
-        el('th', null, '状态'), el('th', null, '进度'), el('th', null, '信息'))),
+        el('th', null, '状态'), el('th', null, '进度'), el('th', null, '信息'), el('th', null, '操作'))),
       el('tbody', null, rows.length ? rows : el('tr', null,
-        el('td', {colspan:6}, el('div', {class:'empty'}, '暂无任务')))))
+        el('td', {colspan:7}, el('div', {class:'empty'},
+          '该状态下暂无任务。'))))
+    ),
+    pager
   );
+  startJobSse();
+}
+
+async function jobAction(id, action) {
+  try {
+    await api('/api/v1/jobs/' + id + '/' + action, {method:'POST', body:'{}'});
+    loadJobs();
+  } catch (e) {
+    setStatus('操作失败：' + e.message, 'err');
+  }
+}
+
+// SSE 实时更新：任务页可见时订阅 /api/v1/jobs/events，
+// 服务端每秒推一帧（有变化才推），断线自动重连。
+let jobSse = null;
+function startJobSse() {
+  if (!$('#tab-jobs') || $('#tab-jobs').hidden) return;
+  if (jobSse) return; // 已在订阅
+  try { jobSse = new EventSource('/api/v1/jobs/events'); } catch (_) { return; }
+  const stEl = () => $('#sse-state');
+  jobSse.addEventListener('stats', (ev) => {
+    if (stEl()) { try {
+      const s = JSON.parse(ev.data);
+      stEl().textContent = '实时 · 待 ' + s.jobsPending + ' · 运行 ' + s.jobsRunning +
+                           ' · 完成 ' + s.jobsDone + ' · 失败 ' + s.jobsFailed;
+    } catch (_) {} }
+  });
+  jobSse.addEventListener('jobs', (ev) => {
+    if (!$('#tab-jobs').hidden) loadJobs().catch(()=>{});
+  });
+  jobSse.onerror = () => {
+    if (jobSse) { jobSse.close(); jobSse = null; }
+    const e = stEl(); if (e) e.textContent = '实时连接断开';
+    setTimeout(() => { if (!$('#tab-jobs').hidden) startJobSse(); }, 5000);
+  };
+}
+function stopJobSse() {
+  if (jobSse) { jobSse.close(); jobSse = null; }
+  const e = $('#sse-state'); if (e) e.textContent = '';
 }
 
 // ---------- 收藏夹 ----------
@@ -390,6 +524,7 @@ async function showTab(name) {
   for (const tab of ['overview','library','jobs','folders']) {
     $('#tab-' + tab).hidden = (tab !== name);
   }
+  if (name !== 'jobs') stopJobSse();
   if (location.hash.slice(1) !== name) history.replaceState(null, '', '#' + name);
   try { await loaders[name](); setStatus(''); }
   catch (e) { setStatus(e.message, 'err'); }
@@ -413,9 +548,10 @@ async function loadAll() {
 
 if (TOKEN) loadAll(); else setStatus('填写访问令牌后点「连接」', null);
 
-// 任务页自动刷新（仅在该页可见时）
+// 任务页由 SSE 实时驱动（startJobSse）；这里保留一个低频兜底轮询，
+// SSE 不可用的浏览器（极少）也能刷新。
 setInterval(() => {
-  if (!$('#tab-jobs').hidden && TOKEN) loadJobs().catch(()=>{});
+  if (!$('#tab-jobs').hidden && TOKEN && !jobSse) loadJobs().catch(()=>{});
 }, 5000);
 </script>
 </body>

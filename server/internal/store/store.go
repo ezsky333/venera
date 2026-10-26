@@ -215,6 +215,10 @@ func (s *Store) migrate() error {
 	if err := s.ensureColumn("comics", "chapter_list", "TEXT"); err != nil {
 		return err
 	}
+	// jobs.priority 支持"置顶"：数值大的先被 worker 领取。
+	if err := s.ensureColumn("jobs", "priority", "INTEGER DEFAULT 0"); err != nil {
+		return err
+	}
 	return nil
 }
 
