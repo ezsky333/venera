@@ -461,6 +461,26 @@ class NasClient {
     }
   }
 
+  /// 拉取服务端所有漫画源的脚本。
+  ///
+  /// 用于新设备首次连接时自动补齐源：没有源，收藏列表和阅读都无法工作。
+  Future<List<Map<String, dynamic>>> sourceBundles() async {
+    if (!isEnabled) return [];
+    final dio = _dio;
+    if (dio == null) return [];
+    try {
+      var res = await dio.get(
+        '/api/v1/sources/bundle',
+        options: Options(receiveTimeout: const Duration(seconds: 60)),
+      );
+      if (res.statusCode != 200 || res.data is! Map) return [];
+      var list = (res.data['sources'] as List?) ?? [];
+      return list.map((e) => Map<String, dynamic>.from(e as Map)).toList();
+    } catch (e) {
+      return [];
+    }
+  }
+
   /// 服务器信息（用于设置页展示）。
   Future<Map<String, dynamic>?> info() async {
     if (!isEnabled) return null;

@@ -111,6 +111,8 @@ func (s *Server) Handler() http.Handler {
 	api.HandleFunc("POST /api/v1/jobs/retry", s.handleRetryFailed)
 
 	api.HandleFunc("GET /api/v1/sources", s.handleSources)
+	api.HandleFunc("GET /api/v1/sources/bundle", s.handleSourceBundles)
+	api.HandleFunc("GET /api/v1/sources/{key}/script", s.handleSourceScript)
 	api.HandleFunc("POST /api/v1/sources/refresh", s.handleSourceRefresh)
 	api.HandleFunc("POST /api/v1/sources/{key}/probe", s.handleSourceProbe)
 	api.HandleFunc("GET /api/v1/sources/{key}/features", s.handleSourceFeatures)
@@ -734,6 +736,31 @@ func (s *Server) handleRetryFailed(w http.ResponseWriter, r *http.Request) {
 // ---------- 源管理 ----------
 func (s *Server) handleSources(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"sources": s.src.List()})
+}
+
+// handleSourceBundles 一次性下发所有源的脚本。
+//
+// 客户端首次连接 NAS 时调用，把服务端已有的源装到本地，
+// 这样"新设备装好就有源"，不用让用户手动导入 34 个 JS 文件。
+func (s *Server) handleSourceBundles(w http.ResponseWriter, r *http.Request) {
+	bundles := s.src.Bundles()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count":   len(bundles),
+		"sources": bundles,
+	})
+}
+
+// handleSourceScript 下发单个源的脚本（用于增量补齐/更新）。
+func (s *Server) handleSourceScript(w http.ResponseWriter, r *http.Request) {
+	key := r.PathValue("key")
+	b, ok := s.src.Bundle(key)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "source not found"})
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("X-Source-Version", b.Version)
+	_, _ = w.Write([]byte(b.Script))
 }
 
 func (s *Server) handleSourceRefresh(w http.ResponseWriter, r *http.Request) {

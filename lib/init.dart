@@ -19,6 +19,7 @@ import 'package:venera/utils/app_links.dart';
 import 'package:venera/utils/handle_text_share.dart';
 import 'package:venera/utils/opencc.dart';
 import 'package:venera/utils/nas_sync.dart';
+import 'package:venera/utils/nas_source_sync.dart';
 import 'package:venera/utils/tags_translation.dart';
 import 'package:venera/utils/translations.dart';
 import 'foundation/appdata.dart';
@@ -71,6 +72,12 @@ Future<void> init() async {
   if (NasClient.instance.isEnabled) {
     Future.microtask(() async {
       try {
+        // 顺序很重要：先补源，再同步数据。
+        //
+        // 没有源时收藏虽然能落地（用的是 sourceType 而非源对象），
+        // 但列表渲染需要源来解析封面/打开详情；先补源能让随后的
+        // 同步结果立刻可见，而不是"数据有了但界面还是空的"。
+        await NasSourceSync.ensureSourcesOnStartup();
         await NasSync().syncNow(full: false);
       } catch (e) {
         Log.error("NAS", "startup sync failed: $e");

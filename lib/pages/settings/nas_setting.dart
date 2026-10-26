@@ -19,6 +19,7 @@ class _NasSettingState extends State<NasSetting> {
 
   bool isTesting = false;
   bool isSyncing = false;
+  bool isSyncingSources = false;
 
   /// 服务端探测结果，用于展示（null 表示还未探测）
   Map<String, dynamic>? serverInfo;
@@ -176,6 +177,20 @@ class _NasSettingState extends State<NasSetting> {
                 ],
               ),
               const SizedBox(height: 12),
+              // 源同步：新设备装好 App 后最需要的一步
+              Button.outlined(
+                isLoading: isSyncingSources,
+                onPressed: _syncSources,
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Icon(Icons.extension_outlined, size: 18),
+                    const SizedBox(width: 8),
+                    Text("Sync Sources from NAS".tl),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 8),
               // 下载管理与库浏览
               Button.outlined(
                 onPressed: () {
@@ -286,20 +301,23 @@ class _NasSettingState extends State<NasSetting> {
     if (!mounted) return;
     context.showMessage(message: "Connected".tl);
 
-    // 关键顺序：**先**启动同步，再关闭页面。
+    // 关键顺序：**先**补源并启动同步，再关闭页面。
     //
     // 反过来的写法（先 App.rootPop() 再 NasSync().syncNow()）有一个隐蔽的
     // 致命问题：rootPop 在某些路由栈状态下会抛异常，一旦抛出，
     // 后面的同步就永远不执行——现象是"显示已连接，但收藏一条都同步不过来"，
     // 而界面上完全看不出错误。
     //
-    // 同步本身不 await：它是后台任务，不该卡住页面关闭。
-    final syncFuture = NasSync().syncNow(full: true);
+    // 补源必须排在最前：新设备一个源都没有，收藏落地了也显示不出来。
+    final syncFuture = () async {
+      await NasSourceSync.syncFromNas();
+      await NasSync().syncNow(full: true);
+    }();
 
     App.rootPop();
 
     // pop 之后仍保留一份引用，避免 future 被 GC 前无人等待；
-    // 失败已经在 syncNow 内部记录到 lastError，这里只兜住未捕获异常。
+    // 失败已经在内部记录，这里只兜住未捕获异常。
     unawaited(syncFuture.catchError((Object e) {
       Log.error('NAS Sync', 'post-connect sync failed: $e');
     }));
@@ -328,6 +346,34 @@ class _NasSettingState extends State<NasSetting> {
     if (!mounted) return;
     context.showMessage(message: "Disconnected".tl);
     App.rootPop();
+  }
+
+  /// 从 NAS 补齐漫画源。
+  ///
+  /// 强制模式（force: true）：连本机已有的同名源也覆盖。
+  /// 之所以给这个选项，是因为"我明明连上了但源还是旧的"是常见诉求，
+  /// 而自动流程为了不降级用户本机的新版只补缺失。
+  Future<void> _syncSources() async {
+    setState(() {
+      isSyncingSources = true;
+    });
+    final before = ComicSourceManager().all().length;
+    final added = await NasSourceSync.syncFromNas(force: true);
+    final after = ComicSourceManager().all().length;
+    if (!mounted) return;
+    setState(() {
+      isSyncingSources = false;
+    });
+
+    if (added == 0 && after == before) {
+      context.showMessage(message: "No new sources from NAS".tl);
+    } else {
+      context.showMessage(
+        message: "${"Synced".tl} ${after - before >= 0 ? '+' : ''}"
+            "$after",
+      );
+    }
+    await _refreshInfo();
   }
 }
 

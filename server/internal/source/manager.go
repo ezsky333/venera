@@ -233,6 +233,45 @@ type Source struct {
 	Path    string `json:"-"`
 }
 
+// Bundle 是分发给客户端的完整源脚本。
+//
+// 为什么要下发脚本本身而不只是 key/name：
+// 新设备（平板/模拟器）刚装好 App 时**一个源都没有**。用户手动导入 34 个
+// JS 文件是不现实的，而没有源就没法渲染收藏、没法阅读。
+// 既然服务端已经为了下载而持有一份源脚本，直接复用是最省事且一致的方案
+// ——两端跑的是同一版本，行为不会分叉。
+type Bundle struct {
+	Key     string `json:"key"`
+	Name    string `json:"name"`
+	Version string `json:"version"`
+	Script  string `json:"script"`
+}
+
+// Bundles 返回所有源的完整脚本（按 key 排序，保证输出稳定）。
+func (m *Manager) Bundles() []Bundle {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]Bundle, 0, len(m.scripts))
+	for _, s := range m.scripts {
+		out = append(out, Bundle{
+			Key: s.Key, Name: s.Name, Version: s.Version, Script: s.JS,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out
+}
+
+// Bundle 返回单个源的脚本。
+func (m *Manager) Bundle(key string) (Bundle, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	s, ok := m.scripts[key]
+	if !ok {
+		return Bundle{}, false
+	}
+	return Bundle{Key: s.Key, Name: s.Name, Version: s.Version, Script: s.JS}, true
+}
+
 // List 返回所有已安装源（按 key 排序以保证输出稳定）。
 func (m *Manager) List() []Source {
 	m.mu.RLock()

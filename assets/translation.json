@@ -498,6 +498,8 @@
     "Cancelled": "已取消",
     "All": "全部",
     "Server URL": "服务器地址",
+    "Sync Sources from NAS": "从 NAS 同步漫画源",
+    "No new sources from NAS": "NAS 上没有新的漫画源",
     "Continue": "继续",
     "Bearer token configured on the server": "服务端配置的访问令牌"
   },
@@ -1000,6 +1002,8 @@
     "Cancelled": "已取消",
     "All": "全部",
     "Server URL": "伺服器位址",
+    "Sync Sources from NAS": "從 NAS 同步漫畫源",
+    "No new sources from NAS": "NAS 上沒有新的漫畫源",
     "Continue": "繼續",
     "Bearer token configured on the server": "伺服器設定的存取權杖"
   }
