@@ -259,9 +259,23 @@ jobs:
           if-no-files-found: error
 
   # ─────────────────────────── Windows ───────────────────────────
+  #
+  # 固定 windows-2022 而不用 windows-latest：
+  #
+  # windows-latest 已迁到 Visual Studio 18 / MSVC 14.51，而该版本把
+  # <experimental/coroutine> 硬性弃用，编译期直接用 static_assert 报错：
+  #
+  #   ...\MSVC\14.51.36231\include\experimental\coroutine(37,1):
+  #     error C2338: static assertion failed: 'error STL1011:
+  #     The /await compiler option, <experimental/coroutine>, ... are deprecated'
+  #
+  # 报错来自 flutter_inappwebview_windows / flutter_qjs 这些插件的
+  # 第三方 C++ 源码（不是本项目代码），且实测编译到 501 秒才失败。
+  # windows-2022 是 VS 17（MSVC 14.3x），仍然支持这套头文件，
+  # 与项目开发环境一致。
   windows:
     name: Windows Installer
-    runs-on: windows-latest
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
 
