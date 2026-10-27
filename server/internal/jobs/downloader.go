@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/venera-app/venera-nas/internal/model"
@@ -42,9 +43,23 @@ type Downloader struct {
 	transform TransformFunc
 	// fetch 负责实际下载图片（可为 nil，使用默认实现）。
 	fetch FetchFunc
+	// hub 是实时进度中心（可为 nil：测试与无面板场景下退化为只写库）。
+	//
+	// 分层理由见 live.go：进度每张图都变，落库太贵、只在内存里
+	// 更新才能像 aria2 那样顺滑；数据库降级为检查点。
+	hub *Hub
 	// logger
 	logf func(format string, args ...any)
 }
+
+// SetHub 注入实时进度中心。
+func (d *Downloader) SetHub(h *Hub) { d.hub = h }
+
+// checkpointEvery 是进度落库的最小间隔。
+//
+// 进度本身走内存（hub），数据库只需要"崩溃后能大致看出下到哪了"，
+// 因此 5 秒一次足够；状态跃变（完成/失败/暂停）仍然立即落库。
+const checkpointEvery = 5 * time.Second
 
 // TransformFunc 对图片字节做源要求的变换。
 //
@@ -150,6 +165,15 @@ func (d *Downloader) RunJob(jobID int64, detail *model.ComicDetail) error {
 
 	// 决定要下载哪些章节
 	targets := detail.Chapters
+	// 单章漫画（wnacg / 绅士漫画等画廊型源）没有章节列表：
+	// App 的读取约定是 loadEp(comicId, null) 直接取整本图片。
+	// 这里等价处理：把整本当"一个章节"下载，章节 ID 用漫画 ID——
+	// 与客户端 NAS 缓存查询的 key（单章 = 漫画 id）保持一致。
+	// 修复前：targets 为空 → 任务瞬间 "complete" 但一张图都没下
+	//（24 个 wnacg 收藏全部如此假完成）。
+	if len(targets) == 0 {
+		targets = []model.Chapter{{ID: detail.ID, Title: detail.Title}}
+	}
 	if len(job.Chapters) > 0 {
 		want := map[string]bool{}
 		for _, c := range job.Chapters {
@@ -216,20 +240,94 @@ func (d *Downloader) RunJob(jobID int64, detail *model.ComicDetail) error {
 			continue
 		}
 		progress := float64(i) / float64(total)
-		_ = d.store.UpdateJob(jobID, model.JobRunning, progress,
-			fmt.Sprintf("downloading chapter %d/%d: %s", i+1, total, ch.Title), "")
+		d.reportProgress(jobID, model.JobRunning, progress,
+			fmt.Sprintf("downloading chapter %d/%d: %s", i+1, total, ch.Title),
+			Live{ChapterIndex: i + 1, ChapterTotal: total, ChapterTitle: ch.Title})
+
+		// ---- 章内进度：内存实时，数据库只做检查点 ----
+		//
+		// 旧实现每涨 1% 就 UPDATE 一次 jobs 表，于是必须靠节流把频率
+		// 压到"每秒最多一次"——这正是面板进度看起来一卡一卡、
+		// 没有 aria2 那种顺滑感的原因：进度是**数据库驱动**的。
+		//
+		// 现在的分层（与 aria2 一致）：
+		//   - 每张图完成 → 只写内存 Hub（零 IO，可任意高频）
+		//   - SSE 每 200ms 合并推一帧
+		//   - SQLite 每 5 秒才检查点一次，供进程崩溃后恢复
+		//
+		// 并发正确性：图片是多 goroutine 并发的，完成计数递增顺序
+		// ≠ 回调到达顺序。用 progMu 保证进度只增不减（乱序回调丢弃）。
+		var progMu sync.Mutex
+		maxP := -1.0
+		lastCheckpoint := time.Time{}
+		var bytesDone int64
+		onImage := func(done, totalImgs int) {
+			if totalImgs <= 0 {
+				return
+			}
+			base := float64(i) / float64(total)
+			step := 1.0 / float64(total)
+			p := base + step*(float64(done)/float64(totalImgs))
+			if p > 0.999 {
+				p = 0.999 // 1.0 只由完成态写入，避免未收尾就显示 100%
+			}
+
+			progMu.Lock()
+			if p <= maxP {
+				progMu.Unlock()
+				return
+			}
+			maxP = p
+			needCheckpoint := time.Since(lastCheckpoint) >= checkpointEvery
+			if needCheckpoint {
+				lastCheckpoint = time.Now()
+			}
+			b := bytesDone
+			progMu.Unlock()
+
+			if d.hub != nil {
+				d.hub.Report(Live{
+					JobID: jobID, Progress: p, Bytes: b,
+					ChapterIndex: i + 1, ChapterTotal: total, ChapterTitle: ch.Title,
+					ImageDone: done, ImageTotal: totalImgs,
+					Status: string(model.JobRunning),
+					Message: fmt.Sprintf("chapter %d/%d: %d/%d images",
+						i+1, total, done, totalImgs),
+				})
+			}
+			// 检查点：只有到了间隔才落库
+			if needCheckpoint {
+				_ = d.store.UpdateJob(jobID, model.JobRunning, p,
+					fmt.Sprintf("downloading chapter %d/%d: %d/%d images",
+						i+1, total, done, totalImgs), "")
+			}
+		}
+		// addBytes 由图片下载协程累加已落盘字节数（供实时速度计算）。
+		addBytes := func(n int64) {
+			progMu.Lock()
+			bytesDone += n
+			progMu.Unlock()
+		}
 
 		// 单章失败不再中止整本。
 		//
 		// 一本 200 话的漫画若在第 3 话因为一次 EOF 就整体失败，
 		// 那么每次重试都要从头再来，永远也下载不完。
 		// 正确做法是记下失败章节继续往下下，最后按比例判定整本状态。
-		if err := d.downloadChapter(detail, ch, baseDir); err != nil {
+		if err := d.downloadChapterProgressBytes(detail, ch, baseDir, onImage, addBytes); err != nil {
 			d.logf("[%d/%d] chapter %s failed: %v", i+1, total, ch.ID, err)
 			failedChapters = append(failedChapters, ch.ID)
 			lastErr = err
 		}
 	}
+
+	// 终态：先落库，再清掉内存实时记录（面板改为从 jobs 表读最终状态）
+	defer func() {
+		if d.hub != nil {
+			d.hub.SetStatus(jobID, "", "")
+			d.hub.Clear(jobID)
+		}
+	}()
 
 	// 一章都没成功 → 整本失败（多半是源配置/登录问题，重试有意义）
 	if len(failedChapters) > 0 && len(failedChapters) >= len(targets) {
@@ -285,8 +383,46 @@ func (d *Downloader) saveCover(detail *model.ComicDetail, baseDir string) error 
 	return os.WriteFile(path, data, 0o644)
 }
 
+// ProgressFunc 汇报章内图片完成数（done 已完成，total 总页数）。
+//
+// 存在意义：单章漫画（wnacg 等画廊型源）整本就是一个"章节"，
+// 进度只能靠页数推进；没有这个回调，面板在整个下载期间恒显示 0%。
+// 允许为 nil。
+type ProgressFunc func(done, total int)
+
+// ByteFunc 汇报单张图片落盘的字节数（用于实时速度）。
+type ByteFunc func(n int64)
+
+// reportProgress 同时更新内存实时状态与数据库检查点。
+//
+// 状态跃变（进入 running、完成、失败）必须立即落库，
+// 只有高频的百分比变化才走内存。
+func (d *Downloader) reportProgress(jobID int64, status model.JobStatus, progress float64, message string, extra Live) {
+	extra.JobID = jobID
+	extra.Progress = progress
+	extra.Status = string(status)
+	extra.Message = message
+	if d.hub != nil {
+		// 保留已有的字节计数，避免被章节切换清零
+		if prev, ok := d.hub.Get(jobID); ok {
+			extra.Bytes = prev.Bytes
+			extra.SpeedBps = prev.SpeedBps
+		}
+		d.hub.Report(extra)
+	}
+	_ = d.store.UpdateJob(jobID, status, progress, message, "")
+}
+
 // downloadChapter 下载一章的所有图片。
 func (d *Downloader) downloadChapter(detail *model.ComicDetail, ch model.Chapter, baseDir string) error {
+	return d.downloadChapterProgress(detail, ch, baseDir, nil)
+}
+
+func (d *Downloader) downloadChapterProgress(detail *model.ComicDetail, ch model.Chapter, baseDir string, onProgress ProgressFunc) error {
+	return d.downloadChapterProgressBytes(detail, ch, baseDir, onProgress, nil)
+}
+
+func (d *Downloader) downloadChapterProgressBytes(detail *model.ComicDetail, ch model.Chapter, baseDir string, onProgress ProgressFunc, onBytes ByteFunc) error {
 	urls, err := d.run.LoadEpisodes(detail.Source, detail.ID, ch.ID)
 	if err != nil {
 		return fmt.Errorf("load pages: %w", err)
@@ -319,6 +455,10 @@ func (d *Downloader) downloadChapter(detail *model.ComicDetail, ch model.Chapter
 	sem := make(chan struct{}, d.concurrency)
 	var wg sync.WaitGroup
 
+	// 已完成计数（成功+失败都算"处理完"），用于章内进度回调
+	var doneCount atomic.Int64
+	totalImgs := len(urls)
+
 	for idx, imgURL := range urls {
 		wg.Add(1)
 		go func(idx int, imgURL string) {
@@ -329,14 +469,26 @@ func (d *Downloader) downloadChapter(detail *model.ComicDetail, ch model.Chapter
 			data, err := d.fetchImageWithRetry(detail, ch, imgURL, &cfgCache)
 			if err != nil {
 				results <- result{idx, err}
+				if onProgress != nil {
+					onProgress(int(doneCount.Add(1)), totalImgs)
+				}
 				return
 			}
 			path := filepath.Join(dir, fmt.Sprintf("%d%s", idx, imageExt(data)))
 			if err := os.WriteFile(path, data, 0o644); err != nil {
 				results <- result{idx, err}
+				if onProgress != nil {
+					onProgress(int(doneCount.Add(1)), totalImgs)
+				}
 				return
 			}
 			results <- result{idx, nil}
+			if onBytes != nil {
+				onBytes(int64(len(data)))
+			}
+			if onProgress != nil {
+				onProgress(int(doneCount.Add(1)), totalImgs)
+			}
 		}(idx, imgURL)
 	}
 	wg.Wait()

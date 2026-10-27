@@ -28,6 +28,33 @@ class NasChapterCache extends ChangeNotifier {
   Set<String> _cached = {};
   Set<String> get cachedChapters => _cached;
 
+  /// 判断某章是否已缓存，兼容"整本作为一个章节"的服务端记录。
+  ///
+  /// 背景：画廊型源（wnacg 等）没有章节列表，服务端下载时把整本
+  /// 存成 chapter_id == comicId 的单条记录。而客户端在有章节列表的
+  /// 情况下按真实章节 id 比对，两边 key 体系不同 → 永远匹配不上，
+  /// 表现为"已缓存却显示未缓存、还能反复触发下载"。
+  ///
+  /// 因此：真实章节 id 命中，或集合里存在"整本记录"（key == comicId），
+  /// 都算已缓存。
+  bool isCached(String chapterId) {
+    if (_cached.contains(chapterId)) return true;
+    // 整本记录：服务端用 comicId 作为唯一章节 id
+    if (_cached.contains(comicId)) return true;
+    return false;
+  }
+
+  /// 是否缓存了"整本"（服务端合成的单章记录）。
+  bool get hasWholeBookRecord => _cached.contains(comicId);
+
+  /// 仅供测试：直接替换内部缓存集合，避免依赖网络。
+  @visibleForTesting
+  void replaceCached(Set<String> chapters) {
+    _cached = Set.of(chapters);
+    _memo[_key] = _CacheEntry(_cached, true);
+    _safeNotify();
+  }
+
   bool _loading = false;
   bool get isLoading => _loading;
 
@@ -160,20 +187,45 @@ class NasChapterCache extends ChangeNotifier {
 
   /// 轮询任务完成情况，完成后刷新一次真实状态。
   ///
-  /// 下载是服务端后台任务，客户端不持有进度流，因此用有限次轮询
-  /// 代替（最多 60 次 × 3 秒）。轮询失败不影响 UI。
+  /// 下载是服务端后台任务，客户端不持有进度流，因此用轮询代替。
+  ///
+  /// 时长取舍：原先是 60 次 × 3 秒（共 3 分钟），但真实漫画常有
+  /// 150+ 页、200MB+（实测《契薬交唇》153 页 233MB），3 分钟根本
+  /// 下不完，轮询结束后 UI 永远停在"未缓存"。这里放宽到 20 分钟
+  /// 并把首轮间隔缩短（前 10 次 1 秒），小文件能很快看到结果。
+  ///
+  /// 另外：无论成功与否，结束时要清掉 memo，避免把"过期空结果"
+  /// 缓存 30 秒继续误导用户。
   Future<void> _refreshLater() async {
-    for (var i = 0; i < 60; i++) {
-      await Future.delayed(const Duration(seconds: 3));
+    var sawChange = false;
+    for (var i = 0; i < 240; i++) {
+      final wait = i < 10 ? const Duration(seconds: 1) : const Duration(seconds: 5);
+      await Future.delayed(wait);
       if (_disposed) return;
       final chapters =
           await NasClient.instance.cachedChapters(sourceKey, comicId);
-      if (chapters.length != _cached.length) {
+      if (chapters.length != _cached.length || !_sameSet(chapters, _cached)) {
         _cached = chapters;
         _memo[_key] = _CacheEntry(chapters, true);
+        sawChange = true;
         _safeNotify();
+        // 服务端已落库（整本记录或所有章节都在），可以停了
+        if (chapters.isNotEmpty && !_loading) break;
       }
     }
+    if (!sawChange) {
+      // 没有任何变化：清 memo，让下次进入强制重查（而不是吃 30 秒旧值）
+      _memo.remove(_key);
+      _safeNotify();
+    }
+  }
+
+  static bool _sameSet(Set<String> a, Set<String> b) {
+    if (a.length != b.length) return false;
+    for (final e in a) {
+      if (!b.contains(e)) return false;
+    }
+    return true;
   }
 
   /// 外部手动刷新（下拉刷新 / 从设置页返回）。

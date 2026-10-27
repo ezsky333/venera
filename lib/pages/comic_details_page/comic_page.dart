@@ -823,6 +823,14 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
       // 单章漫画（绅士漫画等）通常只给预览图、不返回章节列表，
       // 于是 _ComicChapters 根本不会渲染，"这一章 NAS 有没有缓存"
       // 就没有地方展示了。这里补一个独立的信息块顶上。
+      //
+      // 注意：这里必须显式启动 NAS 查询。原实现只在下面的
+      // _ComicChapters 分支调用 _ensureNasCache()，单章分支直接
+      // return 了信息栏，但 nasCache 还是 null —— 信息栏内部
+      // 因 cache == null 又把自己隐藏，于是"下载完成后依然显示
+      // 未缓存、还能再次触发下载"（用户实测：契薬交唇 153 页
+      // 已缓存 233MB，详情页仍提示未缓存）。
+      _ensureNasCache();
       return _NasCacheInfoBar(
         nasCache: nasCache,
         comicId: comic.id,

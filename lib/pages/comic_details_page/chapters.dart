@@ -156,7 +156,7 @@ class _NormalComicChaptersState extends State<_NormalComicChapters> {
                   var value = chapters[key]!;
                   bool visited = (history?.readEpisode ?? {}).contains(i + 1);
                   final nas = widget.nasCache;
-                  final cached = nas?.cachedChapters.contains(key) ?? false;
+                  final cached = nas?.isCached(key) ?? false;
                   final requesting = nas?.isRequesting(key) ?? false;
                   // 兜底渲染时，明确未缓存的章节要灰掉
                   final uncached =
@@ -377,7 +377,7 @@ class _GroupedComicChaptersState extends State<_GroupedComicChapters>
                         history!.readEpisode.contains(rawIndex);
                   }
                   final nas = widget.nasCache;
-                  final cached = nas?.cachedChapters.contains(key) ?? false;
+                  final cached = nas?.isCached(key) ?? false;
                   final requesting = nas?.isRequesting(key) ?? false;
                   final uncached =
                       widget.nasUncached?.contains(key) ?? false;
@@ -568,7 +568,7 @@ class _NasCacheInfoBarState extends State<_NasCacheInfoBar> {
 
     // 单章场景：用漫画 id 作为章节 key 查询
     final chapterId = widget.comicId;
-    final cached = cache.cachedChapters.contains(chapterId);
+    final cached = cache.isCached(chapterId);
     final requesting = cache.isRequesting(chapterId);
 
     return SliverToBoxAdapter(

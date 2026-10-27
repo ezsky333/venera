@@ -259,10 +259,29 @@ func nodeTypeName(n *html.Node) string {
 //
 // 要点：
 //   - DocumentNode（html.Parse 的根）需要向下进入子节点；
-//   - 跳过 head / script / style / noscript，贴近 App 的 innerText 直觉。
+//   - 收集**容器**文本时跳过 head/script/style/noscript（贴近 innerText 直觉）；
+//   - 但节点**自身**是 script/style 时必须返回它内部的文本。
+//
+// 上面最后一条是 ehentai 全线失败的根因：源脚本用
+//   document.querySelectorAll("script").find(e => e.text.includes("var token"))
+// 定位携带图片 token 的内联脚本。早期实现对任何 script 元素都直接返回
+// 空串，于是 find() 永远返回 undefined，紧接着 `script.text` 抛
+// "Cannot read property 'text' of undefined" —— 101/107 个 ehentai
+// 任务全部卡在 loadInfo 就是这个原因，与 Cookie / 代理无关
+//（实测同一份 Cookie 直接请求能拿到 82KB 完整页面且含 var token）。
 func textOf(n *html.Node) string {
 	if n == nil {
 		return ""
+	}
+	// 节点自身就是 script/style：返回其内容，而不是忽略。
+	if n.Type == html.ElementNode && (n.Data == "script" || n.Data == "style") {
+		var b strings.Builder
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			if c.Type == html.TextNode {
+				b.WriteString(c.Data)
+			}
+		}
+		return b.String()
 	}
 	var b strings.Builder
 	var walk func(*html.Node)
@@ -277,6 +296,7 @@ func textOf(n *html.Node) string {
 		case html.ElementNode:
 			switch x.Data {
 			case "script", "style", "noscript", "template", "head":
+				// 子节点是 script/style 等不参与可见文本，跳过
 				return
 			}
 			for c := x.FirstChild; c != nil; c = c.NextSibling {

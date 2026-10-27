@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/venera-app/venera-nas/internal/jobs"
 	"github.com/venera-app/venera-nas/internal/model"
 )
 
@@ -82,13 +83,14 @@ func (s *Server) handleJobAction(w http.ResponseWriter, r *http.Request) {
 // handleJobsEvents 是任务事件的 SSE 端点。
 //   GET /api/v1/jobs/events
 //
-// 推送内容：
-//   - event: stats  —— 任务状态计数（每次任务状态变化时）
-//   - event: jobs   —— 当前页任务列表的完整快照（节流后推送，保证客户端
-//     无需再发请求就能刷新表格）
+// 推送两类事件：
+//   - event: live   —— 实时进度帧（内存快照，200ms 合并推送）
+//   - event: jobs   —— 任务列表快照（仅在状态集合变化时重查数据库）
 //
-// 节流策略：最快每 1s 推一次快照，进度变化不到 1% 不触发。
-// 面板断开后 context 取消，goroutine 退出，不泄漏。
+// 关键改动（性能）：旧实现每秒对每个连接执行一次 Stats()，
+// 而 Stats() 要聚合 cached_chapters/favorites/histories 三张大表，
+// 多个面板同时打开就是每秒数十次全表聚合。现在进度走内存 Hub，
+// 数据库只在"任务状态跃变"时被重查一次。
 func (s *Server) handleJobsEvents(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -112,49 +114,84 @@ func (s *Server) handleJobsEvents(w http.ResponseWriter, r *http.Request) {
 		return true
 	}
 
-	// 立即推一帧，客户端不用等第一个 tick
-	stats, _ := s.st.Stats()
-	if !writeEvent("stats", stats) {
-		return
+	statusFilter := r.URL.Query().Get("status")
+
+	// 立即推一帧任务列表，客户端不用等第一个 tick
+	sendJobs := func() bool {
+		jobs, _, err := s.st.ListJobs(statusFilter, 50, 0)
+		if err != nil {
+			return true
+		}
+		return writeEvent("jobs", jobs)
 	}
-	jobs, _, _ := s.st.ListJobs(r.URL.Query().Get("status"), 50, 0)
-	if !writeEvent("jobs", jobs) {
+	if !sendJobs() {
 		return
 	}
 
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
-	lastSig := ""
+	var liveCh <-chan []jobs.Live
+	var unsubscribe func()
+	if s.hub != nil {
+		liveCh, unsubscribe = s.hub.Subscribe()
+		defer unsubscribe()
+		if !writeEvent("live", s.hub.Snapshot()) {
+			return
+		}
+	}
+
+	// 心跳：防止反代/浏览器在长时间无变化时断流
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+
+	// 状态变化兜底轮询：Hub 缺失时退化为每 2 秒查一次
+	fallback := time.NewTicker(2 * time.Second)
+	defer fallback.Stop()
+
+	seenVersion := int64(-1)
+	if s.hub != nil {
+		seenVersion = s.hub.StateVersion()
+	}
+
 	for {
 		select {
 		case <-r.Context().Done():
 			return
-		case <-ticker.C:
-			stats, err := s.st.Stats()
-			if err != nil {
-				continue
+
+		case frame, ok := <-liveCh:
+			if !ok {
+				return
 			}
-			// 变化信号：状态计数 + 运行中任务的进度
-			sig := fmt.Sprintf("%d-%d-%d-%d", stats.JobsPending, stats.JobsRunning,
-				stats.JobsDone, stats.JobsFailed)
-			if run, _, err := s.st.ListJobs("running", 20, 0); err == nil {
-				for _, j := range run {
-					sig += fmt.Sprintf("-%d:%.2f", j.ID, j.Progress)
+			if !writeEvent("live", frame) {
+				return
+			}
+			// 状态跃变（完成/失败/暂停）时补一帧任务列表
+			if s.hub != nil {
+				if v := s.hub.StateVersion(); v != seenVersion {
+					seenVersion = v
+					if !sendJobs() {
+						return
+					}
 				}
 			}
-			if sig == lastSig {
-				continue
-			}
-			lastSig = sig
-			if !writeEvent("stats", stats) {
+
+		case <-heartbeat.C:
+			if _, err := fmt.Fprintf(w, ": ping\n\n"); err != nil {
 				return
 			}
-			jobs, _, err := s.st.ListJobs(r.URL.Query().Get("status"), 50, 0)
-			if err != nil {
+			flusher.Flush()
+
+		case <-fallback.C:
+			// 没有 Hub（或订阅已失效）时保证列表仍能刷新
+			if s.hub == nil {
+				if !sendJobs() {
+					return
+				}
 				continue
 			}
-			if !writeEvent("jobs", jobs) {
-				return
+			if v := s.hub.StateVersion(); v != seenVersion {
+				seenVersion = v
+				if !sendJobs() {
+					return
+				}
 			}
 		}
 	}

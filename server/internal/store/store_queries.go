@@ -601,10 +601,22 @@ func (s *Store) ClaimNextJob() (*model.Job, error) {
 	return j, nil
 }
 
+// JobProgressHook 是可选的进度观测钩子（测试与运维用，生产可为 nil）。
+//
+// 在 UpdateJob 落库成功后调用，参数为该任务本次写入的进度值与消息。
+// 纯观测用途，不参与业务判定；nil 时零开销。
+type JobProgressHook func(id int64, progress float64, message string)
+
+// OnJobProgress 由外部（测试）设置；生产不设置。
+var OnJobProgress JobProgressHook
+
 func (s *Store) UpdateJob(id int64, status model.JobStatus, progress float64, message, errMsg string) error {
 	_, err := s.db.Exec(
 		`UPDATE jobs SET status = ?, progress = ?, message = ?, error = ?, updated_at = ? WHERE id = ?`,
 		string(status), progress, message, errMsg, time.Now().UnixMilli(), id)
+	if err == nil && OnJobProgress != nil {
+		OnJobProgress(id, progress, message)
+	}
 	return err
 }
 

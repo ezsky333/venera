@@ -49,6 +49,8 @@ type Manager struct {
 	dataDir string
 	mu      sync.RWMutex
 	scripts map[string]scriptEntry
+	// domainHealed 记录已做过"域名自愈"的源，进程内只做一次。
+	domainHealed map[string]bool
 
 	initJS  string
 	store   jshost.SourceDataStore
@@ -456,6 +458,7 @@ func (m *Manager) withHost(key string, fn func(h *jshost.Host) error) error {
 	if err := m.runInit(h); err != nil {
 		return err
 	}
+	m.ensureDomains(h, key)
 	return fn(h)
 }
 
@@ -480,6 +483,54 @@ func (m *Manager) runInit(h *jshost.Host) error {
 	}
 	_ = v
 	return nil
+}
+
+// ensureDomains 修复"动态域名"源的空域名问题。
+//
+// wnacg 的域名列表存在 JS 静态变量 Wnacg.domains，只有用户手动点
+// 「刷新域名列表」或打开 refreshDomainsOnStart 才会填充。App 里这是
+// 内存态、进程长存没问题；服务端每个操作都新建 JS 环境（withHost），
+// 域名永远为空 → baseUrl 抛 "Selected domain is unavailable"，
+// wnacg 全部 24 个收藏下载失败。
+//
+// 处理：源带 refreshDomains / refreshApiDomains 且当前域名为空时，
+// 调一次刷新函数填充。结果随 Host 生命周期存活——对本条调用足够；
+// 进程内用 domainHealed 去重，避免每个任务都打一次发布页。
+// jm 的 init() 自己会在域名失效时走 fallbackServers，不受影响。
+func (m *Manager) ensureDomains(h *jshost.Host, key string) {
+	m.mu.RLock()
+	_, fresh := m.domainHealed[key]
+	m.mu.RUnlock()
+	if fresh {
+		return
+	}
+	v, err := h.Call(`(async () => {
+		const s = __source;
+		// 通用判空：静态域名数组挂在类的 static 字段上（Wnacg.domains），
+		// 实例上未必可见，所以按源各自暴露的刷新函数判断。
+		if (typeof s.refreshDomains === "function") {
+			if (typeof Wnacg !== "undefined" && Wnacg.domains && Wnacg.domains.length > 0) return "have";
+			await s.refreshDomains(false);
+			return "refreshed";
+		}
+		if (typeof s.refreshApiDomains === "function") {
+			// jm：init 里按设置刷新过；只有 domainSelection 指向的
+			// 域名取不到时才需要再刷（refreshApiDomains 内部有兜底）。
+			return "skip";
+		}
+		return "none";
+	})()`)
+	if err != nil {
+		// 刷新失败不阻塞下载：源会给出原本的错误信息
+		m.logf("warning", "domain heal", fmt.Sprintf("%s: %v", key, err))
+	}
+	m.mu.Lock()
+	if m.domainHealed == nil {
+		m.domainHealed = map[string]bool{}
+	}
+	m.domainHealed[key] = true
+	m.mu.Unlock()
+	_ = v
 }
 
 // ---------- 源方法封装 ----------
@@ -656,6 +707,12 @@ type ImageConfig struct {
 	OnResponseJS string `json:"onResponseJS,omitempty"`
 	// ModifyImageJS 是图片级变换函数源码（切片重排）。
 	ModifyImageJS string `json:"modifyImageJS,omitempty"`
+	// OnLoadFailedJS 是"换一个地址重试"的脚本源码。
+	//
+	// ehentai 等源在图片服务器限流/失效时，会通过 onLoadFailed 返回
+	// 一个新的配置（换 nl 参数或换镜像）。没有它，一张图 509 之后
+	// 就只能失败。字段保存的是函数源码，由下载器在失败时求值。
+	OnLoadFailedJS string `json:"onLoadFailedJS,omitempty"`
 }
 
 // ImageConfigFor 取图片加载配置（对应 App 的 ImageLoadingConfig）。
@@ -676,7 +733,7 @@ func (m *Manager) ImageConfigFor(key, imageURL, comicID, ep string) (*ImageConfi
 			const out = {};
 			const fn = s.comic && s.comic.onImageLoad;
 			if (typeof fn === "function") {
-				const c = await fn(%s, %s, %s);
+				const c = await fn(%s, %s, %s, null);
 				if (c) {
 					if (c.url) out.url = String(c.url);
 					if (c.method) out.method = String(c.method);
@@ -688,6 +745,7 @@ func (m *Manager) ImageConfigFor(key, imageURL, comicID, ep string) (*ImageConfi
 					}
 					if (typeof c.onResponse === "function") out.onResponseJS = c.onResponse.toString();
 					if (c.modifyImage) out.modifyImageJS = String(c.modifyImage);
+					if (typeof c.onLoadFailed === "function") out.onLoadFailedJS = c.onLoadFailed.toString();
 				}
 			}
 			return JSON.stringify(out);

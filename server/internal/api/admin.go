@@ -313,10 +313,20 @@ func (s *Server) handleComicFallback(w http.ResponseWriter, r *http.Request) {
 		// 因此这里优先返回源端全量列表，并把每章是否已缓存显式标出；
 		// 客户端据此渲染灰掉的未缓存章节，下标关系永远成立。
 		if full, err := s.st.GetComicChapterList(srcKey, comicID); err == nil && len(full) > 0 {
+			// 服务端可能只存了一条"整本"记录（chapter_id == comicId），
+			// 画廊型源下载时就是这样。此时全量章节表里的每一章都应视为
+			// 已缓存——否则客户端会把它们全灰掉，明明能读却显示未缓存。
+			wholeBookCached := false
+			if _, ok := cachedByID[comicID]; ok {
+				wholeBookCached = true
+			}
 			fullList := make([]map[string]any, 0, len(full))
 			hasCached := make([]bool, 0, len(full))
 			for _, c := range full {
 				_, ok := cachedByID[c.ID]
+				if wholeBookCached {
+					ok = true
+				}
 				fullList = append(fullList, map[string]any{
 					"id":      c.ID,
 					"title":   c.Title,

@@ -381,7 +381,9 @@ async function loadJobs(reset) {
     const canCancel = j.status === 'pending' || j.status === 'paused';
     const canRetry = j.status === 'failed' || j.status === 'cancelled';
     const p = Math.round((j.progress || 0) * 100);
-    return el('tr', null,
+    // data-job-id 让 applyLive() 能原地找到这一行做实时刷新：
+    // 只改进度条/百分比/速度/页数/信息，不重建 DOM（aria2 式顺滑的关键）
+    return el('tr', {'data-job-id': String(j.id)},
       el('td', {class:'muted'},
         (j.priority ? '📌 ' : '') + '#' + j.id),
       el('td', null, j.source),
@@ -391,9 +393,12 @@ async function loadJobs(reset) {
           String(j.error).slice(0, 120)) : null),
       el('td', null, el('span', {class:'badge ' + cls(j.status)}, label(j.status))),
       el('td', null,
-        el('div', {class:'muted'}, p + '%'),
+        el('div', {class:'muted'},
+          el('span', {class:'js-pct'}, p + '%'),
+          el('span', {class:'js-speed'}),
+          el('span', {class:'js-pages', style:'margin-left:6px'})),
         el('div', {class:'bar'}, el('i', {style:'width:' + p + '%'}))),
-      el('td', {class:'muted'}, j.message || '—'),
+      el('td', {class:'muted js-msg'}, j.message || '—'),
       el('td', null,
         canPause ? el('button', {class:'btn', onclick: () => jobAction(j.id, 'pause')}, '暂停') : null,
         canResume ? el('button', {class:'btn', onclick: () => jobAction(j.id, 'resume')}, '继续') : null,
@@ -464,24 +469,86 @@ async function jobAction(id, action) {
   }
 }
 
-// SSE 实时更新：任务页可见时订阅 /api/v1/jobs/events，
-// 服务端每秒推一帧（有变化才推），断线自动重连。
+// SSE 实时更新：任务页可见时订阅 /api/v1/jobs/events。
+//
+// 两类事件：
+//   live —— 实时进度帧（服务端 200ms 合并推送），直接原地更新进度条，
+//           **不重查接口**，所以能像 aria2 一样顺滑；
+//   jobs —— 任务列表快照（仅状态跃变时推），这时才重渲染表格。
 let jobSse = null;
+let liveMap = {};          // jobId → 最新实时状态
+let lastJobsRefresh = 0;
+
+function fmtSpeed(bps) {
+  if (!bps || bps <= 0) return '';
+  const u = ['B/s','KB/s','MB/s'];
+  let v = bps, i = 0;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return v.toFixed(v >= 100 || i === 0 ? 0 : 1) + ' ' + u[i];
+}
+
+// 用 liveMap 原地刷新表格里已存在的行（不做 DOM 重建）。
+function applyLive() {
+  const tbody = $('#tab-jobs tbody');
+  if (!tbody) return;
+  for (const tr of tbody.children) {
+    const id = Number(tr.dataset.jobId || 0);
+    if (!id) continue;
+    const l = liveMap[id];
+    if (!l || l.status !== 'running') continue;
+    const pct = Math.max(0, Math.min(99, Math.round((l.progress || 0) * 100)));
+    const bar = tr.querySelector('.bar > i');
+    if (bar) bar.style.width = pct + '%';
+    const pctEl = tr.querySelector('.js-pct');
+    if (pctEl) pctEl.textContent = pct + '%';
+    const msgEl = tr.querySelector('.js-msg');
+    if (msgEl && l.message) msgEl.textContent = l.message;
+    const spEl = tr.querySelector('.js-speed');
+    if (spEl) {
+      const sp = fmtSpeed(l.speedBps);
+      spEl.textContent = sp ? ' · ' + sp : '';
+    }
+    const pgEl = tr.querySelector('.js-pages');
+    if (pgEl && l.imageTotal > 0) {
+      pgEl.textContent = l.imageDone + '/' + l.imageTotal + ' 页';
+    }
+  }
+}
+
 function startJobSse() {
   if (!$('#tab-jobs') || $('#tab-jobs').hidden) return;
   if (jobSse) return; // 已在订阅
   try { jobSse = new EventSource('/api/v1/jobs/events?token=' + encodeURIComponent(TOKEN)); } catch (_) { return; }
   const stEl = () => $('#sse-state');
-  jobSse.addEventListener('stats', (ev) => {
-    if (stEl()) { try {
-      const s = JSON.parse(ev.data);
-      stEl().textContent = '实时 · 待 ' + s.jobsPending + ' · 运行 ' + s.jobsRunning +
-                           ' · 完成 ' + s.jobsDone + ' · 失败 ' + s.jobsFailed;
-    } catch (_) {} }
+
+  jobSse.addEventListener('live', (ev) => {
+    try {
+      const frame = JSON.parse(ev.data) || [];
+      liveMap = {};
+      let running = 0;
+      for (const l of frame) {
+        liveMap[l.jobId] = l;
+        if (l.status === 'running') running++;
+      }
+      applyLive();
+      const e = stEl();
+      if (e) {
+        let totalSpeed = 0;
+        for (const l of frame) if (l.status === 'running') totalSpeed += (l.speedBps || 0);
+        const sp = fmtSpeed(totalSpeed);
+        e.textContent = '实时 · 运行 ' + running + (sp ? ' · ' + sp : '');
+      }
+    } catch (_) {}
   });
-  jobSse.addEventListener('jobs', (ev) => {
+
+  jobSse.addEventListener('jobs', () => {
+    // 列表快照：状态集合变了才重渲染（限速，避免与 live 帧互相干扰）
+    const now = Date.now();
+    if (now - lastJobsRefresh < 400) return;
+    lastJobsRefresh = now;
     if (!$('#tab-jobs').hidden) loadJobs().catch(()=>{});
   });
+
   jobSse.onerror = () => {
     if (jobSse) { jobSse.close(); jobSse = null; }
     const e = stEl(); if (e) e.textContent = '实时连接断开';
@@ -490,6 +557,7 @@ function startJobSse() {
 }
 function stopJobSse() {
   if (jobSse) { jobSse.close(); jobSse = null; }
+  liveMap = {};
   const e = $('#sse-state'); if (e) e.textContent = '';
 }
 

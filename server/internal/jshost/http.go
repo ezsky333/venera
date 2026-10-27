@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"compress/zlib"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -100,6 +101,26 @@ func (h *Host) jsHTTP(msg map[string]any) goja.Value {
 	}
 
 	// 组装 body
+	//
+	// 关键：JS 对象（map）必须按 Content-Type 决定序列化方式。
+	// 早期实现一律按 URL 表单编码，导致所有"JSON body"接口失败——
+	// ehentai 的 showpage / imagedispatch 就是典型：
+	// 源脚本传 {'Content-Type': 'application/json'} + 对象，
+	// 服务端却发 `gid=...&imgkey=...`，上游回
+	// {"error":"Invalid JSON Request"}，于是拿不到 i3/i6，
+	// 源脚本 `reg[1]` 崩溃 → 101/107 个 ehentai 任务失败。
+	//
+	// dio 的行为是：Content-Type 含 json → jsonEncode；否则表单编码。
+	contentType := ""
+	if hm, ok := msg["headers"].(map[string]any); ok {
+		for k, v := range hm {
+			if strings.EqualFold(k, "content-type") {
+				contentType = strings.ToLower(fmt.Sprint(v))
+				break
+			}
+		}
+	}
+
 	var body io.Reader
 	if d := msg["data"]; d != nil {
 		switch v := d.(type) {
@@ -110,13 +131,23 @@ func (h *Host) jsHTTP(msg map[string]any) goja.Value {
 		case []byte:
 			body = bytes.NewReader(v)
 		default:
-			// 表单/JSON 混用场景：若是 map 则按 URL 编码（对齐 Dart dio 的默认行为）
 			if m, ok := d.(map[string]any); ok {
-				form := url.Values{}
-				for k, vv := range m {
-					form.Set(k, fmt.Sprint(vv))
+				if strings.Contains(contentType, "json") {
+					// JSON body：直接序列化对象（不转义 HTML，与 dio 一致）
+					var buf bytes.Buffer
+					enc := json.NewEncoder(&buf)
+					enc.SetEscapeHTML(false)
+					if err := enc.Encode(m); err != nil {
+						return h.httpResult(0, nil, nil, "encode json body: "+err.Error())
+					}
+					body = bytes.NewReader(bytes.TrimRight(buf.Bytes(), "\n"))
+				} else {
+					form := url.Values{}
+					for k, vv := range m {
+						form.Set(k, fmt.Sprint(vv))
+					}
+					body = strings.NewReader(form.Encode())
 				}
-				body = strings.NewReader(form.Encode())
 			} else {
 				body = strings.NewReader(fmt.Sprint(d))
 			}

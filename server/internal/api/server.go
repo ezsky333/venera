@@ -31,6 +31,8 @@ type Server struct {
 	src      *source.Manager
 	worker   *jobs.Worker
 	dl       *jobs.Downloader
+	// hub 是实时进度中心（可为 nil：退化为只读数据库）。
+	hub      *jobs.Hub
 	log      *slog.Logger
 	started  time.Time
 }
@@ -56,6 +58,7 @@ type Deps struct {
 	Source *source.Manager
 	Worker *jobs.Worker
 	DL     *jobs.Downloader
+	Hub    *jobs.Hub
 	Logger *slog.Logger
 }
 
@@ -71,6 +74,7 @@ func New(d Deps) *Server {
 		src:     d.Source,
 		worker:  d.Worker,
 		dl:      d.DL,
+		hub:     d.Hub,
 		log:     d.Logger,
 		started: time.Now(),
 	}
