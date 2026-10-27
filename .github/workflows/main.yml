@@ -345,8 +345,12 @@ jobs:
           set -euo pipefail
           mkdir -p "$DIST"
           find build/linux -name "*.deb" -exec cp -v {} "$DIST"/ \; || true
-          find build/linux -name "*.zst" -exec cp -v {} "$DIST"/ \; || true
+          # flutter_to_arch 会产出正式包与 debug 版两个 .zst，只留正式包。
+          # 不过滤的话 Release 里会混进一个 0.1MB 的 venera-debug-*.zst，
+          # 用户很容易下错。
+          find build/linux -name "*.zst" ! -name "*debug*" -exec cp -v {} "$DIST"/ \; || true
           find build/linux -name "*.AppImage" -exec cp -v {} "$DIST"/ \; || true
+          echo "=== collected ==="
           ls -lh "$DIST" || true
 
       - uses: actions/upload-artifact@v4
