@@ -311,9 +311,18 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
     // 此时先去问源站 = 白等 12 秒超时再降级，体验上就是"点了没反应"。
     // 所以这里把顺序反过来：先试 NAS，NAS 没有才回去试源站。
     if (NasOfflineMode.instance.preferNasOnly) {
+      // 短超时：离线模式下 NAS 是第一优先，它在局域网里要么秒回、
+      // 要么根本不在。用默认超时去等一个不在的 NAS 会把
+      // "离线模式"变成"点开详情页卡 25 秒"。
       final offlineFb = await NasClient.instance.comicFallback(
         sourceKey: widget.sourceKey,
         comicId: widget.id,
+        fastTimeout: true,
+      );
+      Log.info(
+        'NAS',
+        'offline mode: fallback for ${widget.sourceKey}/${widget.id} '
+        '=> ${offlineFb == null ? "null" : "${offlineFb.chapters.length} chapters"}',
       );
       if (offlineFb != null && !offlineFb.isEmpty) {
         nasFallback = offlineFb;
@@ -370,9 +379,18 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
   Future<void> onDataLoaded() async {
     isLiked = comic.isLiked ?? false;
     isFavorite = comic.isFavorite ?? false;
+    // 收藏状态查询也是一次**源站请求**。
+    //
+    // 离线模式下整个详情页的数据都来自 NAS，此时再去问源站：
+    //   1. 必然超时/失败（这正是用户开离线模式的原因）；
+    //   2. 失败日志飘在页面上，看起来就像"NAS 兜底没生效、还在连源站"。
+    // 所以离线模式下跳过它——收藏状态沿用 NAS 兜底数据里的值。
+    //
     // For sources with multi-folder favorites, prefer querying folders to get accurate favorite status
     // Some sources may not set isFavorite reliably when multi-folder is enabled
-    if (comicSource.favoriteData?.loadFolders != null && comicSource.isLogged) {
+    if (!NasOfflineMode.instance.preferNasOnly &&
+        comicSource.favoriteData?.loadFolders != null &&
+        comicSource.isLogged) {
       var res = await comicSource.favoriteData!.loadFolders!(comic.id);
       if (!res.error) {
         if (res.subData is List) {

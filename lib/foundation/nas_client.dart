@@ -1050,23 +1050,38 @@ class NasClient {
     }
   }
 
-  /// 从 NAS 取漫画详情（源站不可达时的兜底）。
+  /// 从 NAS 取漫画详情（源站不可达时的兜底，也是离线模式的主路径）。
   ///
   /// 返回的数据只包含 NAS 已知的部分：标题/封面/标签 + 已缓存的章节。
   /// 它不是源的完整详情（没有推荐、评论、点赞等），
   /// 但足以让详情页**不再是死循环 loading**。
+  ///
+  /// [fastTimeout] 为 true 时用较短的超时（3s 连接 / 5s 接收）。
+  /// 离线模式下这是**第一优先**的请求：NAS 在局域网里要么秒回、
+  /// 要么根本不在。用默认的 5s+20s 去等一个不在的 NAS，
+  /// 会让"离线模式"变成"点开详情页卡 25 秒"。
   Future<NasComicFallback?> comicFallback({
     required String sourceKey,
     required String comicId,
+    bool fastTimeout = false,
   }) async {
     if (!isEnabled) return null;
     final dio = _dio;
     if (dio == null) return null;
     try {
-      var res = await dio.get('/api/v1/comic', queryParameters: {
-        'source': sourceKey,
-        'comicId': comicId,
-      });
+      var res = await dio.get(
+        '/api/v1/comic',
+        queryParameters: {
+          'source': sourceKey,
+          'comicId': comicId,
+        },
+        options: fastTimeout
+            ? Options(
+                sendTimeout: const Duration(seconds: 3),
+                receiveTimeout: const Duration(seconds: 5),
+              )
+            : null,
+      );
       if (res.statusCode != 200 || res.data is! Map) return null;
       final m = Map<String, dynamic>.from(res.data);
       if (m['cached'] != true) return null;

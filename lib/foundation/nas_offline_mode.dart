@@ -89,9 +89,20 @@ class NasOfflineMode with ChangeNotifier {
 
   /// 详情页是否应当**跳过源站**直接走 NAS。
   ///
-  /// 只在"开关打开且 NAS 可达"时为 true：
-  /// 开关开着但 NAS 掉线时，继续尝试源站比直接报错更有用。
-  bool get preferNasOnly => _enabled && _nasReachable;
+  /// 判定依据是"开关打开"这个用户意图，而**不是** [_nasReachable]。
+  ///
+  /// 这里踩过一个很隐蔽的坑：`_nasReachable` 只在 [toggle] 和
+  /// [refreshReachability] 里被赋值，而后者由首页的 initState /
+  /// onResume 触发，是**异步**的。于是：
+  ///   - 重启 App 后直接点进某本漫画的详情页（不经过首页的 await 窗口），
+  ///     `_nasReachable` 还是初值 false → `preferNasOnly` 为 false →
+  ///     详情页**照样去问源站**，离线模式下等 12 秒超时才降级到 NAS；
+  ///   - 用户看到的现象就是"离线模式开着，ehentai 的详情页却还在连源站"。
+  ///
+  /// 现在的语义：开关开着就优先 NAS。NAS 真的不可达时，
+  /// [NasClient.comicFallback] 返回 null，调用方会自然回落到源站流程，
+  /// 不会把用户卡死——这比"因为一个易失的探测标志而白等超时"好得多。
+  bool get preferNasOnly => _enabled;
 
   /// 封面是否应当优先走 NAS（含源站可用时也优先）。
   bool get preferNasCover => _enabled;
