@@ -43,7 +43,30 @@ COPY --from=builder /out/venera-nas /usr/local/bin/venera-nas
 # /library: 漫画文件（建议挂载到大容量卷）
 RUN mkdir -p /data /library && chown -R venera:venera /data /library
 
-USER venera
+# 卷权限自愈。
+#
+# 镜像里 chown 过，但 `-v ./data:/data` 挂载时宿主机目录会盖掉这层权限；
+# 若宿主机目录属于 root，容器以 UID 1000 运行时写不进去，启动就炸：
+#   open store: migrate "CREATE TABLE ...": unable to open database file (14)
+#
+# entrypoint 做两件事：
+#   1) 以 root 启动时，先把 /data /library 的属主修成容器用户；
+#   2) 用 su-exec 降权执行真正的二进制。
+# 以非 root 启动（compose 写了 user:）时跳过 chown，直接 exec。
+RUN apk add --no-cache su-exec
+
+COPY scripts/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod 755 /usr/local/bin/entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+
+# 注意：不再 `USER venera`。
+#
+# entrypoint 需要以 root 起步才能 chown 挂载进来的卷，然后再用 su-exec
+# 降权到 venera 运行。若这里写死 USER venera，chown 就永远失败，
+# 又回到"unable to open database file (14)"。
+# 想强制非 root 时，在 compose 里写 `user: "1000:1000"`，
+# entrypoint 检测到非 root 会直接 exec，不做 chown。
 WORKDIR /home/venera
 
 ENV VENERA_LISTEN=:8080 \
@@ -56,5 +79,3 @@ EXPOSE 8080
 # 容器内自检走 loopback 不需要额外放开监听地址。
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD wget -qO- http://127.0.0.1:8080/healthz || exit 1
-
-ENTRYPOINT ["/usr/local/bin/venera-nas"]

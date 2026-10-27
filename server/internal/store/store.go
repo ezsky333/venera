@@ -25,10 +25,31 @@ func Open(dataDir, libraryDir string) (*Store, error) {
 	// 目录必须先存在，否则 SQLite 报 "unable to open database file"。
 	// 由 Store 自己保证，避免调用方（含测试）踩到这个坑。
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		return nil, fmt.Errorf("create data dir: %w", err)
+		return nil, fmt.Errorf("create data dir %q: %w", dataDir, err)
 	}
 	if err := os.MkdirAll(libraryDir, 0o755); err != nil {
-		return nil, fmt.Errorf("create library dir: %w", err)
+		return nil, fmt.Errorf("create library dir %q: %w", libraryDir, err)
+	}
+
+	// 目录"存在"不代表"能写"。
+	//
+	// Docker 场景踩过：镜像里 `chown venera /data`，但用户用
+	// `-v ./data:/data` 把宿主机目录盖上去，宿主机目录属于 root，
+	// 而容器以 uid 1000 运行 → MkdirAll 对已存在目录直接返回成功，
+	// 直到 SQLite 尝试创建库文件才炸出
+	//   open store: migrate "CREATE TABLE ...": unable to open database file (14)
+	// 这条消息完全看不出是权限问题。这里提前探测一次写权限，
+	// 把"到底是权限、路径还是磁盘"直接讲清楚。
+	if err := checkWritable(dataDir); err != nil {
+		return nil, fmt.Errorf("data dir %q is not writable: %w "+
+			"(hint: if you mount a host directory with -v, its owner must match "+
+			"the container user UID %d, e.g. `chown -R %d:%d /path/to/data`)",
+			dataDir, err, os.Getuid(), os.Getuid(), os.Getuid())
+	}
+	if err := checkWritable(libraryDir); err != nil {
+		return nil, fmt.Errorf("library dir %q is not writable: %w "+
+			"(hint: chown it to the container user UID %d)",
+			libraryDir, err, os.Getuid())
 	}
 
 	dbPath := filepath.Join(dataDir, "nas.db")
@@ -55,6 +76,21 @@ func Open(dataDir, libraryDir string) (*Store, error) {
 }
 
 func (s *Store) Close() error { return s.db.Close() }
+
+// checkWritable 真正往目录里写一个临时文件来验证可写性。
+//
+// 不用 unix.Access 之类的原因：容器里 root 有 CAP_DAC_OVERRIDE，
+// access(2) 在挂载的只读卷上也可能给出误导结果（看起来可写、实际 EROFS）。
+// 直接创建并删除文件是最朴素也最准的判断。
+func checkWritable(dir string) error {
+	f, err := os.CreateTemp(dir, ".venera-writecheck-*")
+	if err != nil {
+		return err
+	}
+	name := f.Name()
+	_ = f.Close()
+	return os.Remove(name)
+}
 
 func (s *Store) DB() *sql.DB        { return s.db }
 func (s *Store) DataDir() string    { return s.dataDir }

@@ -8,6 +8,23 @@ services:
     restart: unless-stopped
     ports:
       - "8080:8080"
+    # ---- 卷权限（必读，部署踩坑点）----
+    #
+    # 镜像里已经 `chown venera /data /library` 并 `USER venera`（UID 1000），
+    # 但下面的 `- ./data:/data` 会把宿主机目录**盖在**镜像目录之上，
+    # 镜像里的 chown 就失效了。宿主机目录若属于 root，容器以 UID 1000
+    # 运行时写不进去，表现为启动即挂：
+    #
+    #   open store: migrate "CREATE TABLE ...": unable to open database file (14)
+    #
+    # 二选一（推荐第一种）：
+    #   1) 把宿主机目录交给 UID 1000：
+    #        mkdir -p ./data ./library
+    #        sudo chown -R 1000:1000 ./data ./library
+    #   2) 或让容器直接用宿主机的 root（NAS 上通常本来就是 root）：
+    #        user: "0:0"     ← 取消下面这行注释
+    #
+    # user: "0:0"
     environment:
       # ---- 必填 ----
       # 客户端访问用的共享密钥。留空则不鉴权（仅建议纯内网）。
