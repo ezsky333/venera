@@ -2,6 +2,9 @@ package store
 
 import (
 	"database/sql"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -364,6 +367,105 @@ func (s *Store) CountComicsMissingMeta() (int, error) {
 		WHERE (COALESCE(author,'') = '' OR COALESCE(description,'') = ''
 		       OR COALESCE(tags,'') IN ('', '[]'))`).Scan(&n)
 	return n, err
+}
+
+// ChapterPageAudit 是一条"页数与磁盘不符"的章节记录。
+type ChapterPageAudit struct {
+	Source    string `json:"source"`
+	ComicID   string `json:"comicId"`
+	ChapterID string `json:"chapterId"`
+	Dir       string `json:"dir"`
+	// Declared 是入库时记的 page_count（客户端据此拼 URL）。
+	Declared int `json:"declared"`
+	// Actual 是磁盘上实际存在的数字命名图片数。
+	Actual int `json:"actual"`
+	// Missing 是声明范围内缺失的页号（最多列前若干个）。
+	Missing []int `json:"missing,omitempty"`
+}
+
+// AuditChapterPages 逐章核对 page_count 与磁盘文件。
+//
+// 背景：早期实现按**原始索引**给图片命名，个别图片重试后仍失败时
+// 会留下编号空洞，而 page_count 记的是"成功张数"——两者不一致，
+// 客户端用 0..page_count-1 拼 URL 就会 404（用户实测：
+// ehentai 4273534 缺 10/13/30/47/49/61，请求 .../10.jpg 直接 404）。
+//
+// 下载侧已改为"缺页即失败、不落库"，这里负责把**存量**坏数据找出来，
+// 由调用方决定删除（删除后增量下载会重新抓这一章）。
+//
+// [limit] 为最多返回多少条，<=0 表示不限。
+func (s *Store) AuditChapterPages(limit int) ([]ChapterPageAudit, error) {
+	rows, err := s.db.Query(
+		`SELECT source, comic_id, chapter_id, dir, page_count
+		 FROM cached_chapters WHERE page_count > 0 ORDER BY source, comic_id`)
+	if err != nil {
+		return nil, err
+	}
+	var list []struct {
+		src, cid, ch, dir string
+		pc                int
+	}
+	for rows.Next() {
+		var it struct {
+			src, cid, ch, dir string
+			pc                int
+		}
+		if err := rows.Scan(&it.src, &it.cid, &it.ch, &it.dir, &it.pc); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		list = append(list, it)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	lib := s.LibraryDir()
+	out := make([]ChapterPageAudit, 0)
+	for _, it := range list {
+		full := filepath.Join(lib, filepath.FromSlash(it.dir))
+		entries, err := os.ReadDir(full)
+		if err != nil {
+			// 目录都没了：同样算坏记录
+			out = append(out, ChapterPageAudit{
+				Source: it.src, ComicID: it.cid, ChapterID: it.ch,
+				Dir: it.dir, Declared: it.pc, Actual: 0,
+			})
+			continue
+		}
+		have := make(map[int]bool, len(entries))
+		for _, e := range entries {
+			name := e.Name()
+			dot := strings.LastIndexByte(name, '.')
+			if dot <= 0 {
+				continue
+			}
+			if n, err := strconv.Atoi(name[:dot]); err == nil {
+				have[n] = true
+			}
+		}
+		var missing []int
+		for i := 0; i < it.pc; i++ {
+			if !have[i] {
+				missing = append(missing, i)
+			}
+		}
+		if len(missing) == 0 && len(have) == it.pc {
+			continue // 完好
+		}
+		if len(missing) > 12 {
+			missing = missing[:12]
+		}
+		out = append(out, ChapterPageAudit{
+			Source: it.src, ComicID: it.cid, ChapterID: it.ch,
+			Dir: it.dir, Declared: it.pc, Actual: len(have), Missing: missing,
+		})
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
 }
 
 // CoverExtCandidates 是封面可能使用的扩展名（按落盘时的魔数决定）。

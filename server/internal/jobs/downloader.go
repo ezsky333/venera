@@ -482,6 +482,17 @@ func (d *Downloader) downloadChapterProgressBytes(detail *model.ComicDetail, ch 
 	// 章节级图片加载配置（部分源对同章所有图使用同一配置）
 	cfgCache := sync.Map{}
 
+	// 下载结果按原始索引存放，最后**按顺序连续落盘**。
+	//
+	// 不能边下边按 idx 命名：失败的图片会留下编号空洞（0,1,2,4,5…），
+	// 而客户端的第 N 页固定映射到 `N.jpg`（见 api.handleChapter 用
+	// PageCount 拼 URL），于是
+	//   - 空洞位置返回 404（用户看到"部分页没下载完成"）
+	//   - 结尾再少几张（PageCount=成功数，但文件名最大到 total-1）
+	// 实测就是这样：章节里挂了 2 张，客户端请求到 10.jpg 直接 404。
+	//
+	// 落盘后文件编号一定是 0..n-1 连续，n == PageCount，两边永远一致。
+	blobs := make([][]byte, len(urls))
 	type result struct {
 		index int
 		err   error
@@ -510,14 +521,7 @@ func (d *Downloader) downloadChapterProgressBytes(detail *model.ComicDetail, ch 
 				}
 				return
 			}
-			path := filepath.Join(dir, fmt.Sprintf("%d%s", idx, imageExt(data)))
-			if err := os.WriteFile(path, data, 0o644); err != nil {
-				results <- result{idx, err}
-				if onProgress != nil {
-					onProgress(int(doneCount.Add(1)), totalImgs)
-				}
-				return
-			}
+			blobs[idx] = data
 			results <- result{idx, nil}
 			if onBytes != nil {
 				onBytes(int64(len(data)))
@@ -548,51 +552,75 @@ func (d *Downloader) downloadChapterProgressBytes(detail *model.ComicDetail, ch 
 	if len(failedIdx) > 0 {
 		d.logf("chapter %s: %d/%d images failed (first: %v)", ch.ID, len(failedIdx), total, firstErr)
 	}
-	// 超过容忍阈值才判定失败，避免把"几乎全没下到"当成成功
-	if len(failedIdx) > maxFailedImages(total) {
-		return fmt.Errorf("%d/%d images failed (first: %v)", len(failedIdx), total, firstErr)
+	// 有缺页就判失败 —— 不允许"缺几张也算成功"。
+	//
+	// 历史行为是容忍 maxFailedImages(total) 以内的缺页（200 页里挂 3 张
+	// 就照常入库），理由是"重下整章代价太高"。但实际后果更糟：
+	//   - 客户端读到那几页是 404 / 空白（用户报告"部分页没下载完成"）
+	//   - 这一章被标记为已缓存，增量下载**永远不会再试**
+	//   - 库里的内容看起来完整，实际问题被永久掩盖
+	//
+	// 现在的语义：要么整章完整，要么不落库。失败的章节会被任务标记为
+	// failed，用户可以重试（重试会重新走一遍源站，通常这次就好了）。
+	// 半成品目录会清掉，避免和下次重试的编号混在一起。
+	if len(failedIdx) > 0 {
+		if err := os.RemoveAll(dir); err != nil {
+			d.logf("chapter %s: cleanup partial dir failed: %v", ch.ID, err)
+		}
+		return fmt.Errorf("%d/%d images failed after retry (first: %v): %v",
+			len(failedIdx), total, firstErr, failedIdx)
 	}
 
-	// 统计大小
+	// ---- 按顺序连续落盘 ----
+	//
+	// 只有下成功的图会被写入，且编号严格从 0 递增，
+	// 因此文件数 == PageCount，客户端用 `0..PageCount-1` 拼 URL 永远不会 404。
+	saved := 0
 	var totalBytes int64
-	if entries, err := os.ReadDir(dir); err == nil {
-		for _, e := range entries {
-			if info, err := e.Info(); err == nil {
-				totalBytes += info.Size()
-			}
+	var writeErr error
+	for _, data := range blobs {
+		if data == nil {
+			continue
 		}
+		path := filepath.Join(dir, fmt.Sprintf("%d%s", saved, imageExt(data)))
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			writeErr = err
+			break
+		}
+		totalBytes += int64(len(data))
+		saved++
+	}
+	if writeErr != nil {
+		// 写盘失败同样是"半成品"，清掉再报错
+		_ = os.RemoveAll(dir)
+		return fmt.Errorf("write image: %w", writeErr)
 	}
 
 	rel, _ := filepath.Rel(d.store.LibraryDir(), dir)
-	pages := total - len(failedIdx)
 	return d.store.PutCachedChapter(model.CachedChapter{
 		Source:       detail.Source,
 		ComicID:      detail.ID,
 		ChapterID:    ch.ID,
 		ChapterTitle: ch.Title,
 		Dir:          filepath.ToSlash(rel),
-		PageCount:    pages,
+		PageCount:    saved,
 		Cover:        relativeTo(d.store.LibraryDir(), filepath.Join(baseDir, "cover.png")),
 		Bytes:        totalBytes,
 		CreatedAt:    time.Now(),
 	})
 }
 
-// maxFailedImages 是单章可容忍的缺页数。
+// 单章可容忍的缺页数：0。
 //
-// 取"总页数的 10%，且至少 2 页"，理由：
-//   - 图片 CDN 偶发单张失败不可避免，为此重下整本不划算；
-//   - 但缺页过多说明源/网络确实有问题，应让任务失败以便重试。
-func maxFailedImages(total int) int {
-	if total <= 0 {
-		return 0
-	}
-	n := total / 10
-	if n < 2 {
-		n = 2
-	}
-	return n
-}
+// 这条策略改动过两次，结论是"容忍"的代价远大于收益：
+//
+//   早先：total/10 且至少 2 页以内算成功。
+//   问题：缺的页在客户端就是 404/空白，而章节被标记为"已缓存"，
+//         增量下载**永远不再尝试**——库里看起来完整，缺陷被永久掩盖。
+//
+// 现在：任何一张图重试后仍失败 → 整章失败、不落库、清掉半成品目录。
+// 任务会标红，用户可以重试；重试走一遍源站通常就好了。
+// 宁可让用户看到"这章失败了、点重试"，也不要给一本看似完整实则残缺的书。
 
 // fetchImageWithRetry 下载单张图片，对可重试错误做有限次退避重试。
 //

@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -48,13 +49,16 @@ func pngBytes() []byte {
 	return []byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0}
 }
 
-// TestChapterToleratesFewImageFailures 锁住这个真实问题：
+// TestTransientImageFailuresRecoveredByRetry 锁住重试的价值：
 //
 //	上游图片 CDN 零星失败（picacg 200 页里挂 3 张、jm 45 页里挂 6 张）
-//	曾经会让整章失败 → 整本失败 → 每次重试都从头再来，永远下不完。
+//	是常态，但绝大多数是瞬时的（EOF / 空 body / 限流 HTML），
+//	隔几百毫秒重试就能成功。
 //
-// 现在的语义：缺页数在阈值内就当成成功，缺口靠客户端回落到在线源。
-func TestChapterToleratesFewImageFailures(t *testing.T) {
+// 注意这里和「缺页即失败」不冲突：
+//   - 本测试：每张图**最终**都下到了 → 整章成功、PageCount=20
+//   - TestAnyFailedImageFailsChapter：重试 3 次仍失败 → 整章失败、不落库
+func TestTransientImageFailuresRecoveredByRetry(t *testing.T) {
 	st := newTestStore(t)
 
 	pages := make([]string, 20)
@@ -153,14 +157,97 @@ func TestNonRetriableImageErrorSkipsRetry(t *testing.T) {
 	}
 }
 
-// TestMaxFailedImages 校验阈值本身。
-func TestMaxFailedImages(t *testing.T) {
-	cases := []struct{ total, want int }{
-		{0, 0}, {1, 2}, {10, 2}, {20, 2}, {30, 3}, {200, 20},
+// TestAnyFailedImageFailsChapter 锁住"缺页即失败"的策略。
+//
+// 历史行为是容忍 total/10（至少 2 页）以内的缺页，理由是"重下整章
+// 代价太高"。实际后果更糟：
+//   - 缺的那几页在客户端是 404 / 空白
+//   - 章节被标记为已缓存 → 增量下载永远不再尝试
+//   - 库里看起来完整，问题被永久掩盖
+//
+// 现在的语义：任何一张图重试后仍失败 → 整章失败、不落库。
+func TestAnyFailedImageFailsChapter(t *testing.T) {
+	st := newTestStore(t)
+
+	// 20 页里只让第 7 页失败（远低于旧阈值 2 页/10% 的容忍线）
+	pages := make([]string, 20)
+	for i := range pages {
+		pages[i] = fmt.Sprintf("https://example.test/%d.jpg", i)
 	}
-	for _, c := range cases {
-		if got := maxFailedImages(c.total); got != c.want {
-			t.Errorf("maxFailedImages(%d) = %d, want %d", c.total, got, c.want)
+	dl := NewDownloader(st, &fakeRunner{pages: pages}, 2)
+	dl.SetFetch(func(url string, _ map[string]string) ([]byte, error) {
+		if url == "https://example.test/7.jpg" {
+			return nil, fmt.Errorf("status 404")
+		}
+		return pngBytes(), nil
+	})
+
+	detail := &model.ComicDetail{
+		Comic:    model.Comic{Source: "s", ID: "c", Title: "t"},
+		Chapters: []model.Chapter{{ID: "1", Title: "ch1"}},
+	}
+	libDir := st.LibraryDir()
+	err := dl.downloadChapter(detail, detail.Chapters[0], libDir)
+	if err == nil {
+		t.Fatal("single failed image must fail the whole chapter, got nil")
+	}
+	t.Logf("error (expected): %v", err)
+
+	// 不能入库
+	ids, err := st.CachedChapterIDs("s", "c")
+	if err != nil {
+		t.Fatalf("CachedChapterIDs: %v", err)
+	}
+	if ids["1"] {
+		t.Error("chapter with missing images must NOT be recorded as cached")
+	}
+
+	// 半成品目录要清掉，避免和下次重试的编号混在一起
+	entries, _ := os.ReadDir(filepath.Join(libDir, chapterDirName(detail.Chapters[0])))
+	if len(entries) > 0 {
+		t.Errorf("partial chapter dir should be cleaned, found %d files", len(entries))
+	}
+}
+
+// TestPagesWrittenContiguously 锁住"文件编号必须连续"。
+//
+// 客户端用 `0..PageCount-1` 拼图片 URL（见 api.handleChapter），
+// 一旦落盘编号有空洞就会 404。旧实现按原始索引命名，遇到失败会留下
+// 空洞 + 结尾缺页，正是用户报告的"部分页没下载完成"。
+func TestPagesWrittenContiguously(t *testing.T) {
+	st := newTestStore(t)
+	pages := []string{
+		"https://example.test/a.jpg",
+		"https://example.test/b.jpg",
+		"https://example.test/c.jpg",
+	}
+	dl := NewDownloader(st, &fakeRunner{pages: pages}, 1)
+	dl.SetFetch(func(string, map[string]string) ([]byte, error) {
+		return pngBytes(), nil
+	})
+
+	detail := &model.ComicDetail{
+		Comic:    model.Comic{Source: "s", ID: "c2", Title: "t"},
+		Chapters: []model.Chapter{{ID: "1", Title: "ch1"}},
+	}
+	if err := dl.downloadChapter(detail, detail.Chapters[0], st.LibraryDir()); err != nil {
+		t.Fatalf("downloadChapter: %v", err)
+	}
+
+	ch, err := st.GetCachedChapter("s", "c2", "1")
+	if err != nil || ch == nil {
+		t.Fatalf("chapter should be cached: %v %v", ch, err)
+	}
+	if ch.PageCount != 3 {
+		t.Fatalf("want 3 pages, got %d", ch.PageCount)
+	}
+
+	// 磁盘上必须是 0,1,2 —— 少一个客户端就会 404
+	dir := filepath.Join(st.LibraryDir(), filepath.FromSlash(ch.Dir))
+	for i := 0; i < ch.PageCount; i++ {
+		matches, _ := filepath.Glob(filepath.Join(dir, fmt.Sprintf("%d.*", i)))
+		if len(matches) == 0 {
+			t.Errorf("page %d missing on disk (client would 404)", i)
 		}
 	}
 }

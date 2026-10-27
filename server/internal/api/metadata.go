@@ -3,10 +3,63 @@ package api
 import (
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 
 	"github.com/venera-app/venera-nas/internal/jobs"
+	"github.com/venera-app/venera-nas/internal/store"
 )
+
+// handleAuditChapterPages 核对 cached_chapters.page_count 与磁盘实际文件。
+//
+// 背景：早期实现按**原始索引**给图片命名，重试后仍失败的图会留下编号空洞，
+// 而 page_count 记的是"成功张数"。两者不一致时，客户端用
+// `0..page_count-1` 拼 URL 就会撞上 404（用户实测 ehentai 4273534
+// 缺 10/13/30/47/49/61，请求 .../10.jpg 直接失败）。
+//
+// 下载侧已改成"缺页即失败、不落库"，此端点负责清理**存量**：
+//   - GET  列出有问题的章节（含缺哪些页）
+//   - POST 删除这些章节记录与残缺文件，之后增量下载会重新抓
+func (s *Server) handleAuditChapterPages(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+
+	items, err := s.st.AuditChapterPages(limit)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	if r.Method == http.MethodGet {
+		if items == nil {
+			items = []store.ChapterPageAudit{}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"broken": len(items),
+			"items":  items,
+			"dryRun": true,
+		})
+		return
+	}
+
+	// POST：删掉这些坏记录（文件一并删除）
+	deleted := 0
+	for _, it := range items {
+		if err := os.RemoveAll(filepath.Join(s.cfg.LibraryDir, filepath.FromSlash(it.Dir))); err != nil {
+			s.log.Info(fmt.Sprintf("audit: remove dir failed for %s: %v", it.ChapterID, err))
+		}
+		if err := s.st.DeleteCachedChapter(it.Source, it.ComicID, it.ChapterID); err != nil {
+			s.log.Info(fmt.Sprintf("audit: delete row failed for %s: %v", it.ChapterID, err))
+			continue
+		}
+		deleted++
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"broken":  len(items),
+		"deleted": deleted,
+		"hint":    "这些章节会在下次增量下载时重新抓取",
+	})
+}
 
 // handleCleanupZeroPages 清理 cached_chapters 里 page_count=0 的脏记录。
 //

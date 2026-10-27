@@ -124,6 +124,10 @@ func (s *Server) Handler() http.Handler {
 	// 清理 page_count=0 的历史脏记录（旧版本把"源站 0 页"记成了成功）。
 	api.HandleFunc("GET /api/v1/maintenance/zero-pages", s.handleCleanupZeroPages)
 	api.HandleFunc("POST /api/v1/maintenance/zero-pages", s.handleCleanupZeroPages)
+	// 核对 page_count 与磁盘文件（旧版本缺页也记成功，留下编号空洞）。
+	// GET 列出问题章节，POST 删除以触发重新下载。
+	api.HandleFunc("GET /api/v1/maintenance/page-audit", s.handleAuditChapterPages)
+	api.HandleFunc("POST /api/v1/maintenance/page-audit", s.handleAuditChapterPages)
 	api.HandleFunc("GET /api/v1/jobs", s.handleJobs)
 	api.HandleFunc("GET /api/v1/jobs/events", s.handleJobsEvents)
 	api.HandleFunc("GET /api/v1/jobs/by-comic", s.handleComicJobs)
