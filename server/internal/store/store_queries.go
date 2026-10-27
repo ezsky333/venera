@@ -414,12 +414,27 @@ func (s *Store) GetHistory(source, comicID string) (*model.History, error) {
 }
 
 func (s *Store) ListHistories(limit int) ([]model.History, error) {
-	if limit <= 0 || limit > 500 {
-		limit = 50
+	// limit<=0 表示"全都要"（快照路径用它，见 syncer.BuildSnapshot）。
+	//
+	// 这里曾经硬性把 >500 折回 50，于是 syncer 传 500 只拿到 500 条，
+	// 而库里可以有上千条历史。快照只带最新 500 条，剩下的永远不会
+	// 通过增量补上（快照会把游标推到最新，旧 op 再也不会重放），
+	// 结果就是"新设备同步完，历史记录少了一截"，而且永远补不回来。
+	var query string
+	if limit <= 0 {
+		query = `SELECT source, comic_id, title, cover, source_type, ep, page, "group", read_eps, max_page, updated_at
+		 FROM histories ORDER BY updated_at DESC`
+	} else {
+		query = `SELECT source, comic_id, title, cover, source_type, ep, page, "group", read_eps, max_page, updated_at
+		 FROM histories ORDER BY updated_at DESC LIMIT ?`
 	}
-	rows, err := s.db.Query(
-		`SELECT source, comic_id, title, cover, source_type, ep, page, "group", read_eps, max_page, updated_at
-		 FROM histories ORDER BY updated_at DESC LIMIT ?`, limit)
+	var rows *sql.Rows
+	var err error
+	if limit <= 0 {
+		rows, err = s.db.Query(query)
+	} else {
+		rows, err = s.db.Query(query, limit)
+	}
 	if err != nil {
 		return nil, err
 	}

@@ -478,7 +478,10 @@ func (s *Syncer) BuildSnapshot() (*Snapshot, error) {
 			ComicID:   f.ID,
 		})
 	}
-	hist, err := s.st.ListHistories(500)
+	// limit 传 0 = 全部历史。快照是"新设备唯一的一次全量机会"：
+	// 截断多少条，接收端就永久少多少条（游标会被推到最新，
+	// 那些旧 op 再也不会重放）。
+	hist, err := s.st.ListHistories(0)
 	if err != nil {
 		return nil, err
 	}

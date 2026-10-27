@@ -540,7 +540,11 @@
     "Check NAS for new chapters": "检查 NAS 上的新章节",
     "Up to date on NAS": "NAS 上已是最新",
     "Missing chapters queued": "缺失章节已加入队列",
-    "NAS queue updated": "NAS 队列已更新"
+    "NAS queue updated": "NAS 队列已更新",
+    "Backfill metadata on NAS": "补全元数据信息",
+    "Backfilling metadata": "正在补全元数据",
+    "Updated": "已更新",
+    "Remaining": "剩余"
   },
   "zh_TW": {
     "Home": "首頁",
@@ -1083,6 +1087,10 @@
     "Check NAS for new chapters": "檢查 NAS 上的新章節",
     "Up to date on NAS": "NAS 上已是最新",
     "Missing chapters queued": "缺失章節已加入佇列",
-    "NAS queue updated": "NAS 佇列已更新"
+    "NAS queue updated": "NAS 佇列已更新",
+    "Backfill metadata on NAS": "補全元資料資訊",
+    "Backfilling metadata": "正在補全元資料",
+    "Updated": "已更新",
+    "Remaining": "剩餘"
   }
 }

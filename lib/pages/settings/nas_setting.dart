@@ -21,6 +21,9 @@ class _NasSettingState extends State<NasSetting> {
   bool isSyncing = false;
   bool isSyncingSources = false;
 
+  /// 元数据补全进行中
+  bool isBackfillingMeta = false;
+
   /// 服务端探测结果，用于展示（null 表示还未探测）
   Map<String, dynamic>? serverInfo;
   String? probeError;
@@ -187,6 +190,21 @@ class _NasSettingState extends State<NasSetting> {
                     const Icon(Icons.extension_outlined, size: 18),
                     const SizedBox(width: 8),
                     Text("Sync Sources from NAS".tl),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 8),
+              // 补全元数据：服务端只下载时才会写作者/简介，
+              // 单纯同步过来的条目永远是空的，需要用户主动回源补一次。
+              Button.outlined(
+                isLoading: isBackfillingMeta,
+                onPressed: _backfillMetadata,
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Icon(Icons.auto_fix_high_outlined, size: 18),
+                    const SizedBox(width: 8),
+                    Text("Backfill metadata on NAS".tl),
                   ],
                 ),
               ),
@@ -381,6 +399,59 @@ class _NasSettingState extends State<NasSetting> {
     if (!mounted) return;
     context.showMessage(message: "Disconnected".tl);
     App.rootPop();
+  }
+
+  /// 让服务端回源补全 comics 表里缺失的元数据。
+  ///
+  /// 为什么需要它：服务端只在**下载任务**里写 author/description
+  /// （下载时源站详情现成可用），而只经过收藏/历史同步落库的条目
+  /// 永远是空作者、空简介——App 的 NAS 兜底详情页与面板都显示不全。
+  ///
+  /// 服务端是串行回源（源站有速率限制），大库可能要跑几分钟，
+  /// 所以这里用可取消的 loading 弹窗把进程显式告诉用户。
+  Future<void> _backfillMetadata() async {
+    setState(() {
+      isBackfillingMeta = true;
+    });
+
+    Map<String, dynamic>? result;
+    Object? err;
+    dynamic loading;
+    try {
+      loading = showLoadingDialog(
+        context,
+        allowCancel: false,
+        barrierDismissible: false,
+        message: "Backfilling metadata".tl,
+      );
+      result = await NasClient.instance.backfillMetadata();
+    } catch (e) {
+      err = e;
+    } finally {
+      loading?.close();
+    }
+
+    if (!mounted) return;
+    setState(() {
+      isBackfillingMeta = false;
+    });
+
+    if (err != null) {
+      context.showMessage(message: '${"Failed".tl}: $err');
+      return;
+    }
+    if (result == null) {
+      context.showMessage(message: "Failed".tl);
+      return;
+    }
+    final updated = (result['updated'] as num?)?.toInt() ?? 0;
+    final remaining = (result['remaining'] as num?)?.toInt() ?? 0;
+    final failed = (result['failed'] as num?)?.toInt() ?? 0;
+    context.showMessage(
+      message: '${"Updated".tl}: $updated · '
+          '${"Remaining".tl}: $remaining'
+          '${failed > 0 ? " · Failed: $failed" : ""}',
+    );
   }
 
   /// 与 NAS 双向对齐漫画源。

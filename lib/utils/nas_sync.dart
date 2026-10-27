@@ -99,6 +99,33 @@ List<ResurrectedFavorite> parseResurrectWarnings(dynamic raw) {
   return out;
 }
 
+/// 构造 `history.update` 的 payload。
+///
+/// 抽成顶层函数是为了可测试：这里的每个字段都会被 `jsonEncode` 编码，
+/// 只要混进一个不可编码的类型（典型的 **Set**），整个 push 请求就会抛
+/// `TypeError` 而失败——**连带同批次里的收藏、设置全部丢失**。
+///
+/// 真实踩过的坑：`readEpisode` 是 `Set<String>`，早期直接塞进 payload，
+/// 结果实时阅读进度一条都推不到服务端，服务端只剩 `_bootstrapPush`
+/// 留下的批量记录（那边写的是 `toList()`），表现为
+/// "收藏同步正常、阅读进度永远停在旧值"。
+Map<String, dynamic> buildHistoryOpPayload(History h) {
+  return {
+    'source': h.type.sourceKey,
+    'comicId': h.id,
+    'title': h.title,
+    'cover': h.cover,
+    'sourceType': h.type.value,
+    'ep': h.ep,
+    'page': h.page,
+    'group': h.group,
+    // 必须是 List：见上面的说明
+    'readEpisodes': h.readEpisode.toList(),
+    'maxPage': h.maxPage,
+    'at': h.time.millisecondsSinceEpoch,
+  };
+}
+
 class NasSync with ChangeNotifier {
   static NasSync? _instance;
   factory NasSync() => _instance ?? NasSync._create();
@@ -212,19 +239,7 @@ class NasSync with ChangeNotifier {
     if (!isEnabled) return;
     _pendingOps.add({
       'type': 'history.update',
-      'payload': {
-        'source': h.type.sourceKey,
-        'comicId': h.id,
-        'title': h.title,
-        'cover': h.cover,
-        'sourceType': h.type.value,
-        'ep': h.ep,
-        'page': h.page,
-        'group': h.group,
-        'readEpisodes': h.readEpisode,
-        'maxPage': h.maxPage,
-        'at': h.time.millisecondsSinceEpoch,
-      },
+      'payload': buildHistoryOpPayload(h),
     });
     _scheduleFlush();
   }

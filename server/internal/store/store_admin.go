@@ -298,6 +298,74 @@ func comicDirOf(chapterDir string) string {
 	return chapterDir
 }
 
+// MetaTarget 是一本"元数据不全"的漫画，供批量补全使用。
+type MetaTarget struct {
+	Source   string `json:"source"`
+	ComicID  string `json:"comicId"`
+	Title    string `json:"title"`
+	Author   string `json:"author"`
+	HasDesc  bool   `json:"hasDesc"`
+	HasTags  bool   `json:"hasTags"`
+	HasCover bool   `json:"hasCover"`
+}
+
+// ComicsMissingMeta 返回元数据不全的漫画（作者/简介/标签任一缺失）。
+//
+// 为什么需要它：comics 表的字段来自两条路——
+//  1. 收藏/历史同步的 op（只有 title/cover/tags，没有 author/description）；
+//  2. 下载任务里的 LoadDetail（字段最全）。
+//
+// 只同步过收藏、从没下载过的漫画，author/description 永远是空，
+// 于是 App 的"NAS 兜底详情页"和面板都显示不出作者与简介。
+// 这个查询就是"哪些条目值得回去问一次源站"。
+//
+// [source] 非空时只查该源；[limit] <= 0 时不限量。
+func (s *Store) ComicsMissingMeta(source string, limit int) ([]MetaTarget, error) {
+	where := `WHERE (COALESCE(author,'') = '' OR COALESCE(description,'') = ''
+	              OR COALESCE(tags,'') IN ('', '[]'))`
+	args := []any{}
+	if source != "" {
+		where += " AND source = ?"
+		args = append(args, source)
+	}
+	q := `SELECT source, comic_id, COALESCE(title,''), COALESCE(author,''),
+	             COALESCE(description,''), COALESCE(tags,''), COALESCE(cover,'')
+	      FROM comics ` + where + ` ORDER BY updated_at DESC`
+	if limit > 0 {
+		q += " LIMIT ?"
+		args = append(args, limit)
+	}
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []MetaTarget
+	for rows.Next() {
+		var t MetaTarget
+		var desc, tags, cover string
+		if err := rows.Scan(&t.Source, &t.ComicID, &t.Title, &t.Author,
+			&desc, &tags, &cover); err != nil {
+			return nil, err
+		}
+		t.HasDesc = strings.TrimSpace(desc) != ""
+		t.HasTags = strings.TrimSpace(tags) != "" && strings.TrimSpace(tags) != "[]"
+		t.HasCover = strings.TrimSpace(cover) != ""
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// CountComicsMissingMeta 统计元数据不全的漫画数量（面板按钮上显示）。
+func (s *Store) CountComicsMissingMeta() (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM comics
+		WHERE (COALESCE(author,'') = '' OR COALESCE(description,'') = ''
+		       OR COALESCE(tags,'') IN ('', '[]'))`).Scan(&n)
+	return n, err
+}
+
 // CoverExtCandidates 是封面可能使用的扩展名（按落盘时的魔数决定）。
 var CoverExtCandidates = []string{".png", ".jpg", ".jpeg", ".webp", ".gif"}
 

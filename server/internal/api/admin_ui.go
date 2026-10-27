@@ -209,8 +209,76 @@ async function loadOverview() {
   root.replaceChildren(
     box,
     el('div', {class:'stats'}, prog),
-    el('div', {class:'muted'}, '同步游标：' + st.cursor + ' · 已同步设备：' + st.clientCount + ' 台')
+    el('div', {class:'muted'}, '同步游标：' + st.cursor + ' · 已同步设备：' + st.clientCount + ' 台'),
+    el('div', {style:'margin-top:16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap'},
+      metaBackfillControls())
   );
+
+  // 顺带刷新"待补全"角标
+  refreshMetaRemaining();
+}
+
+// ---------- 补全元数据 ----------
+//
+// 背景：comics 表的 author/description 只在**下载任务**里写，
+// 只经过收藏/历史同步落库的条目永远缺作者与简介
+//（典型现象：ehentai 117 本全没有作者、没有简介）。
+// 这个按钮让用户一条命令回源补齐，不必逐本重新下载。
+
+function metaBackfillControls() {
+  const box = el('div', {style:'display:inline-flex;gap:10px;align-items:center'});
+  const badge = el('span', {class:'muted', id:'meta-badge'}, '');
+  const btn = el('button', {class:'btn', onclick: () => runMetaBackfill(btn, badge)},
+    '补全元数据信息');
+  box.append(btn, badge);
+  return box;
+}
+
+async function refreshMetaRemaining() {
+  const badge = $('#meta-badge');
+  if (!badge) return;
+  try {
+    const d = await api('/api/v1/admin/metadata');
+    const n = d.remaining || 0;
+    badge.textContent = n > 0 ? ('待补全 ' + n + ' 条') : '元数据已完整';
+  } catch (_) {
+    badge.textContent = '';
+  }
+}
+
+async function runMetaBackfill(btn, badge) {
+  const old = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '补全中…';
+  if (badge) badge.textContent = '正在回源查询，请稍候';
+  setStatus('补全元数据信息…');
+  try {
+    // limit=0 表示全量；源站限速下大库会跑较久，但一次跑完最省心。
+    const r = await api('/api/v1/metadata/backfill', {method:'POST'});
+    const parts = [
+      '扫描 ' + (r.total || 0) + ' 条',
+      '请求 ' + (r.attempted || 0) + ' 条',
+      '已补全 ' + (r.updated || 0) + ' 条',
+    ];
+    if (r.failed) parts.push('失败 ' + r.failed + ' 条');
+    if (r.skipped) parts.push('跳过 ' + r.skipped + ' 条');
+    parts.push('剩余 ' + (r.remaining || 0) + ' 条');
+    setStatus(parts.join(' · '), (r.failed ? 'err' : 'ok'));
+    if (badge) {
+      badge.textContent = (r.remaining > 0)
+        ? ('待补全 ' + r.remaining + ' 条')
+        : '元数据已完整';
+    }
+    if (r.errors && r.errors.length) {
+      console.warn('补全失败样例', r.errors);
+      setStatus(parts.join(' · ') + '（失败样例见控制台）', 'err');
+    }
+  } catch (e) {
+    setStatus('补全失败：' + e.message, 'err');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = old;
+  }
 }
 
 // ---------- 漫画库 ----------

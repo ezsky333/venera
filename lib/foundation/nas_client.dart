@@ -1007,6 +1007,49 @@ class NasClient {
     }
   }
 
+  /// 补全服务端 comics 表里缺失的元数据（作者/上传者/简介/标签）。
+  ///
+  /// 为什么需要这个操作：服务端只有在**下载任务**里才会写 author /
+  /// description（下载时源站详情是现成的），而绝大多数条目只是通过
+  /// 收藏 / 历史同步落库——那些 op 里没有这些字段。
+  /// 于是"只收藏、没下载"的漫画在服务端永远是空作者、空简介，
+  /// App 的 NAS 兜底详情页也就显示不全。
+  ///
+  /// [source] 非空时只补该源；[limit] <= 0 表示全量。
+  /// [dryRun] 为 true 时只返回还剩多少条待补，不做任何修改。
+  ///
+  /// 服务端是串行回源（源站有速率限制），大库会跑得比较久，
+  /// 因此这里把接收超时放宽到 10 分钟。
+  Future<Map<String, dynamic>?> backfillMetadata({
+    String? source,
+    int limit = 0,
+    bool dryRun = false,
+  }) async {
+    if (!isEnabled) return null;
+    final dio = _dio;
+    if (dio == null) return null;
+    try {
+      final params = <String, dynamic>{};
+      if (source != null && source.isNotEmpty) params['source'] = source;
+      if (limit > 0) params['limit'] = limit;
+      final res = dryRun
+          ? await dio.get(
+              '/api/v1/metadata/backfill',
+              queryParameters: params,
+              options: Options(receiveTimeout: const Duration(minutes: 1)),
+            )
+          : await dio.post(
+              '/api/v1/metadata/backfill',
+              queryParameters: params,
+              options: Options(receiveTimeout: const Duration(minutes: 10)),
+            );
+      if (res.statusCode != 200 || res.data is! Map) return null;
+      return Map<String, dynamic>.from(res.data);
+    } catch (e) {
+      return null;
+    }
+  }
+
   /// 从 NAS 取漫画详情（源站不可达时的兜底）。
   ///
   /// 返回的数据只包含 NAS 已知的部分：标题/封面/标签 + 已缓存的章节。

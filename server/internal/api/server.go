@@ -117,6 +117,10 @@ func (s *Server) Handler() http.Handler {
 	api.HandleFunc("GET /api/v1/jobs/queue-favorites", s.handleDownloadFavorites)
 	// 补抓存量封面：只下载缺失的 cover，不动已有内页
 	api.HandleFunc("POST /api/v1/download/covers", s.handleRefetchCovers)
+	// 补全元数据：把 comics 表里缺的 author/description/tags 回源补上。
+	// GET 是"预览"（只返回还剩多少条待补），POST 才真正执行。
+	api.HandleFunc("GET /api/v1/metadata/backfill", s.handleMetadataBackfill)
+	api.HandleFunc("POST /api/v1/metadata/backfill", s.handleMetadataBackfill)
 	api.HandleFunc("GET /api/v1/jobs", s.handleJobs)
 	api.HandleFunc("GET /api/v1/jobs/events", s.handleJobsEvents)
 	api.HandleFunc("GET /api/v1/jobs/by-comic", s.handleComicJobs)
@@ -141,6 +145,9 @@ func (s *Server) Handler() http.Handler {
 	api.HandleFunc("GET /api/v1/admin/jobs", s.handleAdminJobs)
 	api.HandleFunc("POST /api/v1/admin/comic/delete", s.handleAdminDeleteComic)
 	api.HandleFunc("POST /api/v1/admin/chapter/delete", s.handleAdminDeleteChapter)
+	// 面板里的「补全元数据信息」按钮（与 App 同一个端点）
+	api.HandleFunc("GET /api/v1/admin/metadata", s.handleMetadataBackfill)
+	api.HandleFunc("POST /api/v1/admin/metadata", s.handleMetadataBackfill)
 
 	mux.Handle("/api/v1/", s.authMiddleware(api))
 
