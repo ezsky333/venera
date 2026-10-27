@@ -12,7 +12,9 @@ import 'package:venera/foundation/appdata.dart';
 class ReaderImageProvider
     extends BaseImageProvider<image_provider.ReaderImageProvider> {
   /// Image provider for normal image.
-  const ReaderImageProvider(this.imageKey, this.sourceKey, this.cid, this.eid, this.page, {this.enableResize = false});
+  const ReaderImageProvider(this.imageKey, this.sourceKey, this.cid, this.eid,
+      this.page,
+      {this.enableResize = false, this.allowAnimation = false});
 
   final String imageKey;
 
@@ -26,6 +28,15 @@ class ReaderImageProvider
 
   @override
   final bool enableResize;
+
+  /// 是否允许播放动图。
+  ///
+  /// 由阅读器控制：只有**当前停留页、且已停留超过阈值**时才为 true。
+  /// 其余情况（预加载的相邻页、刚翻到还没停稳的页）一律 false，
+  /// 只解首帧——否则一本动图集会让多个动画 ticker 同时跑，
+  /// 内存和 CPU 都爆掉（实测单张 GIF 解码后 98~310MB）。
+  @override
+  final bool allowAnimation;
 
   @override
   Future<Uint8List> load(chunkEvents, checkStop) async {
@@ -122,5 +133,12 @@ class ReaderImageProvider
   }
 
   @override
-  String get key => "$imageKey@$sourceKey@$cid@$eid@$enableResize";
+  // allowAnimation 必须进 key。
+  //
+  // Flutter 的 imageCache 以 key 区分条目：如果同一个页面先以
+  // allowAnimation=false 解码（静态首帧）并缓存，之后想播动画时
+  // key 不变就会直接命中那个静态条目，动画永远不出现。
+  // 这也是"改完之后 GIF 不动了"的直接原因之一。
+  String get key =>
+      "$imageKey@$sourceKey@$cid@$eid@$enableResize@$allowAnimation";
 }

@@ -118,6 +118,41 @@ class _ReaderState extends State<Reader>
     setState(() {});
   }
 
+  /// 停留多久之后才播放动图。
+  ///
+  /// 取值权衡：
+  ///   - 太短（<300ms）快速连翻时每页都触发解码，卡顿回来；
+  ///   - 太长（>2s）用户会觉得"GIF 坏了"。
+  /// 600ms 大约是"翻页动作完成、目光落到画面上"的时间，
+  /// 快速连翻时每页都来不及触发，正好达到目的。
+  static const _animateDelay = Duration(milliseconds: 600);
+
+  Timer? _animateTimer;
+
+  /// 页码变化时被 setPage 调用：先把动画关掉，再排一个延迟开启。
+  ///
+  /// 这是"翻页跟手 + 动图仍能播"的平衡点：
+  ///   - 立刻把 animatePage 置空 → 新页只解首帧，画面最快出来；
+  ///   - 600ms 后若仍停在同一页 → 允许该页播动画。
+  @override
+  void onPageSettling(int page) {
+    _animateTimer?.cancel();
+    _animateTimer = null;
+
+    if (animatePage != null) {
+      animatePage = null;
+      update();
+    }
+
+    _animateTimer = Timer(_animateDelay, () {
+      if (!mounted) return;
+      // 停留够了且还停在同一页 → 允许播动画
+      if (this.page != page) return;
+      animatePage = page;
+      update();
+    });
+  }
+
   /// The maximum page number for images only (excluding chapter comments page).
   /// This is used for display purposes and history recording.
   @override
@@ -230,6 +265,12 @@ class _ReaderState extends State<Reader>
       handleVolumeEvent();
     }
     setImageCacheSize();
+    // 首次进入也排一次"停稳检测"：直接停在某一页时同样应该播动图。
+    // 此时 page 已经确定，放到下一帧再调，避免在 initState 里 setState。
+    final initialPage = page;
+    Future.microtask(() {
+      if (mounted) onPageSettling(initialPage);
+    });
     Future.delayed(const Duration(milliseconds: 200), () {
       LocalFavoritesManager().onRead(cid, type);
     });
@@ -276,6 +317,10 @@ class _ReaderState extends State<Reader>
     if (isFullscreen) {
       fullscreen();
     }
+    // 动画延迟定时器必须取消，否则退出阅读器后它还会
+    // 往已 dispose 的 State 上 setState
+    _animateTimer?.cancel();
+    _animateTimer = null;
     autoPageTurningTimer?.cancel();
     focusNode.dispose();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
@@ -638,8 +683,19 @@ abstract mixin class _ReaderLocation {
     if (_animationCount > 0 && _pendingPage != null && page != _pendingPage) {
       return;
     }
+    if (this.page != page) {
+      // 换页即视为"还没停稳"：停掉动画、回到首帧，让新页第一帧尽快出来。
+      // 具体调度交给 _ReaderState（mixin 里拿不到 mounted/context）。
+      onPageSettling(page);
+    }
     this.page = page;
   }
+
+  /// 页码变化时的"停稳检测"钩子，由 _ReaderState 实现。
+  void onPageSettling(int page);
+
+  /// 允许播放动图的页码（null = 当前不允许任何页播动画）。
+  int? animatePage;
 
   bool _validatePage(int page) {
     return page >= 1 && page <= totalPages;

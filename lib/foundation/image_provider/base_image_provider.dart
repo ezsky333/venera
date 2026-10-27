@@ -32,6 +32,13 @@ abstract class BaseImageProvider<T extends BaseImageProvider<T>>
     return TargetImageSize(width: width, height: height);
   }
 
+  /// 是否允许播放动图。
+  ///
+  /// 默认 false：超过阈值的动图只解首帧。
+  /// 阅读器会把**当前停留页**设为 true（延迟一段时间后），
+  /// 其余预加载页保持 false，这样既跟手又不会同时跑多个动画 ticker。
+  bool get allowAnimation => false;
+
   /// 单张动图允许解码占用的最大内存（字节）。
   ///
   /// 背景：实测《[DMM.com] 神殺しのアリア》里有 232 个动图 GIF。
@@ -47,16 +54,16 @@ abstract class BaseImageProvider<T extends BaseImageProvider<T>>
   /// 1080x498 x 108 帧（232MB），也有 380x214 x 301 帧（98MB）。
   /// 后者像素数不高（24M）但帧数多，按像素判断会漏掉。
   /// 统一按 帧数 × 单帧 RGBA 字节 来算才准确。
-  ///
-  /// 24MB 的取值理由：普通静态图单帧通常 < 8MB，永远碰不到；
-  /// 而 3 张预加载加起来上限 72MB，在手机上属于安全范围。
   static const int maxAnimatedBytes = 24 * 1000 * 1000;
 
   /// 动图解码后超过 [maxAnimatedBytes] 时只保留首帧。
   ///
-  /// 刻意的取舍：宁可看到一张静态图，也不要整个阅读器卡死。
-  /// 用户若确实想看动画，可长按保存后用系统图库打开。
-  static Future<ui.Codec> limitAnimatedFrames(ui.Codec codec) async {
+  /// [forceLimit] 为 true 时不做阈值判断，直接压成首帧
+  /// （用于"这一页还没停留够，先别播动画"的场景）。
+  static Future<ui.Codec> limitAnimatedFrames(
+    ui.Codec codec, {
+    bool forceLimit = false,
+  }) async {
     if (codec.frameCount <= 1) return codec;
 
     // 探一帧拿到尺寸（这一帧不保留，后面由包装后的 codec 重新取）
@@ -68,12 +75,13 @@ abstract class BaseImageProvider<T extends BaseImageProvider<T>>
 
     // RGBA 每像素 4 字节
     final bytes = w * h * 4 * frameCount;
-    if (bytes <= maxAnimatedBytes) return codec;
+    if (!forceLimit && bytes <= maxAnimatedBytes) return codec;
 
     Log.info(
       'Image Loading',
-      'animated image too heavy: ${w}x$h x $frameCount frames = '
-          '${(bytes / 1e6).toStringAsFixed(0)}MB decoded, first frame only',
+      'animated image held on first frame: ${w}x$h x $frameCount frames = '
+          '${(bytes / 1e6).toStringAsFixed(0)}MB decoded'
+          '${forceLimit ? ' (page not settled yet)' : ''}',
     );
     return _FirstFrameOnlyCodec(codec);
   }
@@ -154,10 +162,11 @@ abstract class BaseImageProvider<T extends BaseImageProvider<T>>
           buffer,
           getTargetSize: enableResize ? _getTargetSize : null,
         );
-        // 动图护栏：超大动图只保留首帧，避免一次性解出几百 MB。
-        // 放在这里而不是 loadImage，是因为只有 decode 之后才知道
-        // 帧数和单帧尺寸。
-        return await limitAnimatedFrames(codec);
+        // 动图护栏：
+        //   - allowAnimation=true（当前停留页，且已停留够久）→ 原样播放
+        //   - 否则只解首帧，避免预加载多张时同时跑动画、吃爆内存
+        if (allowAnimation) return codec;
+        return await limitAnimatedFrames(codec, forceLimit: true);
       } catch (e) {
         await CacheManager().delete(this.key);
         if (data.length < 2 * 1024) {

@@ -1316,13 +1316,23 @@ ImageProvider _createImageProviderFromKey(
   int page,
 ) {
   var reader = context.reader;
+  // 只有"当前停留页 + 已停留够久"才允许播动图。
+  //
+  // 一本动图集（实测某本有 232 个 GIF、单张解码后 98~310MB）里，
+  // 若相邻预加载页也播动画，就会同时跑多个动画 ticker：
+  // 内存爆、CPU 满，翻页和滑动一起卡。这里让其余页只解首帧。
+  //
+  // page 是图片自身的页码（调用方传 startIndex+1），
+  // 与 reader.animatePage（当前允许播放的页）比较即可。
+  final allowAnimation = reader.animatePage == page;
   return ReaderImageProvider(
     imageKey,
     reader.type.comicSource?.key,
     reader.cid,
     reader.eid,
-    reader.page,
-    enableResize: reader.mode.isContinuous, // For continuous mode, we need to resize the image to improve performance
+    page,
+    enableResize: reader.mode.isContinuous,
+    allowAnimation: allowAnimation,
   );
 }
 
