@@ -1,0 +1,21 @@
+# 强制 shell 脚本与 Dockerfile 用 LF 换行。
+#
+# Windows 上 core.autocrlf=true 会把 .sh 转成 CRLF，提交到仓库后
+# 容器里会出现：
+#   /usr/local/bin/entrypoint.sh: line 1: #!/bin/sh: not found
+# 原因是 shebang 行尾带了 \r。这里用 -text 关掉换行转换。
+#
+# Dockerfile / docker-compose.yml 同理（虽然 Docker 能容忍部分 CRLF，
+# 但 heredoc 与行尾续行符 `\` 会直接坏掉）。
+
+*.sh            text eol=lf
+Dockerfile      text eol=lf
+*.dockerfile    text eol=lf
+docker-compose*.yml text eol=lf
+
+# 二进制/产物不做转换
+*.png binary
+*.jpg binary
+*.webp binary
+*.gif binary
+*.exe binary
