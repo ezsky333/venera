@@ -461,6 +461,65 @@ func (s *Store) PutSourceData(sourceKey string, data map[string]any) error {
 	return err
 }
 
+// AllSourceData 一次取回全部源的私有配置（快照用）。
+//
+// 逐源调 GetSourceData 会 N 次查询（实测库里 8 个源、真实环境几十个），
+// 而快照是每次新设备接入都跑一遍的热路径，做成单次查询。
+func (s *Store) AllSourceData() (map[string]map[string]any, error) {
+	rows, err := s.db.Query(`SELECT source_key, data FROM source_data`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := map[string]map[string]any{}
+	for rows.Next() {
+		var key, raw string
+		if err := rows.Scan(&key, &raw); err != nil {
+			return nil, err
+		}
+		var data map[string]any
+		if err := json.Unmarshal([]byte(raw), &data); err != nil {
+			// 单条坏数据不该让整个快照失败：跳过即可，
+			// 客户端拿不到这一份配置的后果远小于"完全同步不了"。
+			continue
+		}
+		out[key] = data
+	}
+	return out, rows.Err()
+}
+
+// AllCookies 一次取回全部源的 Cookie，按源分组（快照用）。
+func (s *Store) AllCookies() (map[string][]model.CookieRecord, error) {
+	rows, err := s.db.Query(
+		`SELECT source_key, name, value, domain, path, expires, secure, http_only
+		 FROM source_cookies`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := map[string][]model.CookieRecord{}
+	for rows.Next() {
+		var key string
+		var c model.CookieRecord
+		var exp sql.NullInt64
+		var sec, http int
+		if err := rows.Scan(&key, &c.Name, &c.Value, &c.Domain, &c.Path,
+			&exp, &sec, &http); err != nil {
+			return nil, err
+		}
+		if exp.Valid {
+			v := exp.Int64
+			c.Expires = &v
+		}
+		c.Secure = sec == 1
+		c.HTTPOnly = http == 1
+		out[key] = append(out[key], c)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) GetSourceData(sourceKey string) (map[string]any, error) {
 	var raw string
 	err := s.db.QueryRow(`SELECT data FROM source_data WHERE source_key = ?`, sourceKey).Scan(&raw)

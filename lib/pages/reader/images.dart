@@ -1316,13 +1316,28 @@ ImageProvider _createImageProviderFromKey(
   int page,
 ) {
   var reader = context.reader;
+  // NAS 图片一律开启降采样解码。
+  //
+  // 原逻辑只在连续模式下开 enableResize，画廊模式（默认翻页模式）把
+  // **整张原图**解码进内存。源站图片通常已被 CDN 压缩过，问题不明显；
+  // 但 NAS 存的是下载时的原图，实测单页可达 5~10MB
+  // （jm 有一章平均 5.41MB/页、ehentai 某章 503 页共 1.7GB）。
+  //
+  // 一张 10MB 的 JPEG 解码后动辄 40MB+ 位图，三张预加载就吃满内存，
+  // GC 频繁触发，于是翻页要等下一张解码完才响应——这就是
+  // "NAS 缓存的漫画翻页被阻塞、其他漫画却很流畅"的原因：
+  // 差别不在网络（实测 NAS 单页响应 2~20ms），而在解码。
+  //
+  // enableResize 会走 BaseImageProvider._getTargetSize，把超过
+  // 2560x1440 的图等比缩到该分辨率再解码，内存和耗时都降一个数量级。
+  final isNas = NasClient.isNasUrl(imageKey);
   return ReaderImageProvider(
     imageKey,
     reader.type.comicSource?.key,
     reader.cid,
     reader.eid,
     reader.page,
-    enableResize: reader.mode.isContinuous, // For continuous mode, we need to resize the image to improve performance
+    enableResize: reader.mode.isContinuous || isNas,
   );
 }
 

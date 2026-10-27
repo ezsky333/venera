@@ -13,6 +13,7 @@ import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/nas_client.dart';
 import 'package:venera/utils/nas_cookie_export.dart';
 import 'package:venera/utils/nas_settings_sync.dart';
+import 'package:venera/utils/nas_source_sync.dart';
 
 /// 一次同步的结局。
 ///
@@ -731,6 +732,58 @@ class NasSync with ChangeNotifier {
           histFailed++;
         }
       }
+    }
+
+    // ---- 源私有配置与 Cookie（登录态）----
+    //
+    // 顺序很关键：必须在收藏/历史之前落地。
+    // 收藏列表渲染时就会用到源（拿封面、跳详情），源是未登录状态的话
+    // 用户会先看到一片"请登录"，然后才慢慢恢复。
+    //
+    // 这两段此前**完全缺失**：_pullSnapshot 只处理 favorites / histories /
+    // settings，而 source.data 的处理函数 NasSourceSync.applySourceData
+    // 虽然写好了、却从来没有被调用过（定义了但没接通）。
+    // 直接后果就是用户报告的"pica 的凭证没有同步过来"——
+    // 服务端一直存着那份 token，客户端从来没去拿。
+    try {
+      final rawData = snap['sourceData'];
+      if (rawData is Map && rawData.isNotEmpty) {
+        final remote = <String, Map<String, dynamic>>{};
+        rawData.forEach((k, v) {
+          if (v is Map) {
+            remote[k.toString()] = Map<String, dynamic>.from(v);
+          }
+        });
+        final n = await NasSourceSync.applySourceData(remote);
+        if (n > 0) {
+          Log.info('NAS Sync', 'applied source data for $n sources');
+          applied++;
+        }
+      }
+    } catch (e) {
+      Log.error('NAS Sync', 'apply source data failed: $e');
+    }
+
+    try {
+      final rawCookies = snap['sourceCookies'];
+      if (rawCookies is Map && rawCookies.isNotEmpty) {
+        final remote = <String, List<Map<String, dynamic>>>{};
+        rawCookies.forEach((k, v) {
+          if (v is List) {
+            remote[k.toString()] = v
+                .whereType<Map>()
+                .map((e) => Map<String, dynamic>.from(e))
+                .toList();
+          }
+        });
+        final n = await NasSourceSync.applyCookies(remote);
+        if (n > 0) {
+          Log.info('NAS Sync', 'applied $n cookies from NAS');
+          applied++;
+        }
+      }
+    } catch (e) {
+      Log.error('NAS Sync', 'apply cookies failed: $e');
     }
 
     Log.info(

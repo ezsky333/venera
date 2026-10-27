@@ -4,6 +4,7 @@ import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/nas_client.dart';
+import 'package:venera/network/cookie_jar.dart';
 import 'package:venera/utils/nas_cookie_export.dart';
 
 /// 漫画源的跨设备同步。
@@ -175,6 +176,64 @@ class NasSourceSync {
       }
     }
     return applied;
+  }
+
+  /// 把服务端同步过来的 Cookie 写回本地 Cookie 库。
+  ///
+  /// 这是"新设备上源是未登录状态"的另一个根因修复点：
+  /// ehentai / jm / wnacg 这些源的登录态**只**在 Cookie 里，
+  /// `source.data` 是空壳。只合并 data 而不写 Cookie，
+  /// 新设备看到的仍是"请登录"。
+  ///
+  /// 合并策略与 [applySourceData] 一致：本地已有的同名 Cookie 不覆盖。
+  /// 理由是同一账号在不同设备的 token 可能各自有效，
+  /// 覆盖反而可能把本机顶下线。
+  static Future<int> applyCookies(
+    Map<String, List<Map<String, dynamic>>> remote,
+  ) async {
+    if (remote.isEmpty) return 0;
+    final jar = SingleInstanceCookieJar.instance;
+    if (jar == null) return 0;
+
+    var written = 0;
+    try {
+      for (final entry in remote.entries) {
+        for (final c in entry.value) {
+          final name = c['name']?.toString() ?? '';
+          final value = c['value']?.toString() ?? '';
+          final domain = c['domain']?.toString() ?? '';
+          if (name.isEmpty || domain.isEmpty) continue;
+
+          final path = c['path']?.toString() ?? '/';
+          // 本地已有同名同域同路径的 Cookie → 保留本地
+          final existing = jar.rawDb.select(
+            'SELECT value FROM cookies WHERE name = ? AND domain = ? AND path = ?',
+            [name, domain, path],
+          );
+          if (existing.isNotEmpty) continue;
+
+          final expires = c['expires'];
+          jar.rawDb.execute(
+            'INSERT OR REPLACE INTO cookies '
+            '(name, value, domain, path, expires, secure, httpOnly) '
+            'VALUES (?, ?, ?, ?, ?, ?, ?)',
+            [
+              name,
+              value,
+              domain,
+              path,
+              expires is num ? expires.toInt() : null,
+              c['secure'] == true ? 1 : 0,
+              c['httpOnly'] == true ? 1 : 0,
+            ],
+          );
+          written++;
+        }
+      }
+    } catch (e) {
+      Log.error('NAS Source', 'apply cookies failed: $e');
+    }
+    return written;
   }
 
   /// 启动时若本机一个源都没有，自动从 NAS 补齐。

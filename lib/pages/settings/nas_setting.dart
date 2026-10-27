@@ -247,6 +247,24 @@ class _NasSettingState extends State<NasSetting> {
     );
   }
 
+  /// 保存并连接 NAS。
+  ///
+  /// 交互：点「继续」后立刻弹一个**不可取消**的 loading 弹窗，把
+  /// 探测 → 补源 → 全量同步**全部**跑完，最后才关弹窗（成功则同时关页面，
+  /// 失败则留在页面上显示错误）。
+  ///
+  /// 为什么必须这样：旧实现是「点继续 → 后台起 syncFuture → 立刻 rootPop」，
+  /// 页面回退与后台同步同时进行。新设备首次连接时同步量很大
+  /// （几百条收藏 + 历史 + 设置 + 源配置），这段时间里：
+  ///
+  ///   1. 用户已经回到设置页，却看到收藏夹在眼前一条条长出来；
+  ///   2. 同步过程中会 setState 多个页面，与正在进行的路由回退抢帧，
+  ///      实测在低端机上直接卡死（用户报告的现象）；
+  ///   3. 失败时没有任何提示——页面已经关了，用户以为连上了，
+  ///      实际一条数据都没同步过来。
+  ///
+  /// 现在只有一个明确的终态：弹窗关掉那一刻，要么已连好且同步完，
+  /// 要么停在本页显示错误。
   Future<void> _save() async {
     var url = _urlController.text.trim();
     var token = _tokenController.text.trim();
@@ -268,62 +286,76 @@ class _NasSettingState extends State<NasSetting> {
     // 保留原配置以便失败回滚
     var oldConfig = NasClient.instance.config;
 
+    // allowCancel: false —— 这一步不能在同步中途取消，否则会留下
+    // "配置已保存、数据只同步了一半"的中间态。
+    var loading = showLoadingDialog(
+      context,
+      allowCancel: false,
+      barrierDismissible: false,
+      message: "Connecting to NAS".tl,
+    );
+
     var newConfig = NasConfig(
       baseUrl: NasConfig.normalize(url),
       token: token,
       clientId: NasClient.ensureClientId(),
       cursor: oldConfig.cursor,
     );
-    await NasClient.instance.save(newConfig);
 
-    var ok = await NasClient.instance.probe(force: true);
-    if (!mounted) return;
+    String? failure;
+    try {
+      await NasClient.instance.save(newConfig);
 
-    if (!ok) {
-      // 回滚，避免用户丢失原本可用的配置
-      if (oldConfig.isValid) {
-        await NasClient.instance.save(oldConfig);
-      } else {
-        await NasClient.instance.clear();
+      var ok = await NasClient.instance.probe(force: true);
+      if (!ok) {
+        // 回滚，避免用户丢失原本可用的配置
+        if (oldConfig.isValid) {
+          await NasClient.instance.save(oldConfig);
+        } else {
+          await NasClient.instance.clear();
+        }
+        failure =
+            "Cannot reach the server. Please check the URL and network.".tl;
+        return;
       }
-      setState(() {
-        isTesting = false;
-        probeError = "Cannot reach the server. Please check the URL and network.".tl;
-      });
-      return;
+
+      // ---- 连接成功：把补源 + 全量同步跑完再关弹窗 ----
+      //
+      // 顺序有讲究（与旧实现一致，这部分逻辑本身是对的，只是不该在
+      // 后台跑）：
+      //   1. 先把本机已装的源推上去（服务端据此知道该跑哪些源）；
+      //   2. 再拉服务端有、本机没有的（新设备补齐源脚本）；
+      //   3. 最后全量同步（先拉后推，见 NasSync.syncNow 的说明）。
+      loading.setMessage("Syncing comic sources".tl);
+      await NasSourceSync.pushToNas();
+      await NasSourceSync.pullFromNas();
+
+      loading.setMessage("Syncing data".tl);
+      final result = await NasSync().syncNow(full: true);
+      if (result.outcome == NasSyncOutcome.failed) {
+        // 连接本身是通的，但数据没同步完：不能静默成功，
+        // 否则用户以为数据都在，实际是空的。
+        failure = result.error ?? "Sync failed".tl;
+      }
+    } catch (e) {
+      Log.error('NAS Sync', 'connect failed: $e');
+      failure = e.toString();
+    } finally {
+      loading.close();
     }
 
-    // 连接成功：做一次全量同步
+    if (!mounted) return;
     setState(() {
       isTesting = false;
+      probeError = failure;
     });
+
+    if (failure != null) return;
+
     await _refreshInfo();
     if (!mounted) return;
     context.showMessage(message: "Connected".tl);
-
-    // 关键顺序：**先**补源并启动同步，再关闭页面。
-    //
-    // 反过来的写法（先 App.rootPop() 再 NasSync().syncNow()）有一个隐蔽的
-    // 致命问题：rootPop 在某些路由栈状态下会抛异常，一旦抛出，
-    // 后面的同步就永远不执行——现象是"显示已连接，但收藏一条都同步不过来"，
-    // 而界面上完全看不出错误。
-    //
-    // 源同步必须排在最前：
-    //   1. 先把本机已装的源推上去（服务端据此知道该用哪些源跑下载）；
-    //   2. 再拉服务端有、本机没有的（本机是新设备的场景）。
-    final syncFuture = () async {
-      await NasSourceSync.pushToNas();
-      await NasSourceSync.pullFromNas();
-      await NasSync().syncNow(full: true);
-    }();
-
     App.rootPop();
-
-    // pop 之后仍保留一份引用，避免 future 被 GC 前无人等待；
-    // 失败已经在内部记录，这里只兜住未捕获异常。
-    unawaited(syncFuture.catchError((Object e) {
-      Log.error('NAS Sync', 'post-connect sync failed: $e');
-    }));
   }
 
   Future<void> _syncNow() async {

@@ -405,8 +405,24 @@ type Snapshot struct {
 	Histories []HistoryView              `json:"histories"`
 	Settings  map[string]json.RawMessage `json:"settings,omitempty"`
 	Sources   []store.SourceInfo         `json:"sources,omitempty"`
-	Cursor    int64                      `json:"cursor"`
-	At        time.Time                  `json:"at"`
+	// SourceData 是各源的私有配置（账号、token、baseUrl 等）。
+	//
+	// 必须进快照：新设备首次连接走的就是快照路径（NasSync.syncNow(full:true)
+	// → _pullSnapshot），而 source.data 的增量 op 只会被 _pullIncremental
+	// 读到。早先快照漏了这个字段，于是新设备连上后 source.data 永远为空。
+	//
+	// 实际症状：服务端存着 picacg 的 394 字节配置（account + JWT token），
+	// 新设备却拿不到 —— 用户看到的是"pica 的凭证没同步过来"，实际是
+	// 客户端根本没拿到，而不是没写入。
+	SourceData map[string]map[string]any `json:"sourceData,omitempty"`
+	// SourceCookies 是各源的登录 Cookie（按源分组）。
+	//
+	// 与 SourceData 同理，且更关键：很多源（ehentai / jm / wnacg）的
+	// 登录态**只**存在于 Cookie 里，source.data 是空壳。快照不带这份
+	// 数据，新设备上的源就是未登录状态。
+	SourceCookies map[string][]model.CookieRecord `json:"sourceCookies,omitempty"`
+	Cursor        int64                           `json:"cursor"`
+	At            time.Time                       `json:"at"`
 }
 
 // FavoriteView 是发给客户端的收藏条目。
@@ -505,6 +521,23 @@ func (s *Syncer) BuildSnapshot() (*Snapshot, error) {
 		}
 	}
 	snap.Sources = srcs
+
+	// ---- 源私有配置与 Cookie ----
+	//
+	// 这是"新设备登录态为零"的根因修复点。客户端 full sync 只读快照，
+	// 而快照此前完全没有这两个字段，于是：
+	//   - picacg：token 在 source_data 里，新设备拿不到 → 未登录；
+	//   - ehentai / jm / wnacg：登录态在 Cookie 里 → 同样拿不到。
+	//
+	// 失败不阻断整个快照：源配置缺失只是"要重新登录"，
+	// 而快照失败是"收藏和历史都没有"，后者严重得多。
+	if data, err := s.st.AllSourceData(); err == nil && len(data) > 0 {
+		snap.SourceData = data
+	}
+	if cookies, err := s.st.AllCookies(); err == nil && len(cookies) > 0 {
+		snap.SourceCookies = cookies
+	}
+
 	cursor, err := s.st.MaxOpID()
 	if err != nil {
 		return nil, err
