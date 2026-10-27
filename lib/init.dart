@@ -19,7 +19,7 @@ import 'package:venera/pages/settings/settings_page.dart';
 import 'package:venera/utils/app_links.dart';
 import 'package:venera/utils/handle_text_share.dart';
 import 'package:venera/utils/opencc.dart';
-import 'package:venera/utils/nas_sync.dart';
+import 'package:venera/utils/nas_sync_notice.dart';
 import 'package:venera/utils/nas_source_sync.dart';
 import 'package:venera/utils/tags_translation.dart';
 import 'package:venera/utils/translations.dart';
@@ -80,7 +80,9 @@ Future<void> init() async {
         // 但列表渲染需要源来解析封面/打开详情；先补源能让随后的
         // 同步结果立刻可见，而不是"数据有了但界面还是空的"。
         await NasSourceSync.ensureSourcesOnStartup();
-        await NasSync().syncNow(full: false);
+        // 同步一次并提示结果（已是最新 / 同步中 / 同步完成）。
+        // 提示要等 OverlayWidget 就绪，内部已处理，这里直接 await。
+        await announceNasStartupSync();
       } catch (e) {
         Log.error("NAS", "startup sync failed: $e");
       }

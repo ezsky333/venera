@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -111,11 +112,43 @@ func (s *Store) GetComic(source, comicID string) (*model.Comic, error) {
 
 // ---------- favorites ----------
 
+// ErrFavoriteResurrect 表示这条 fav.add 比墓碑更旧，属于"删除前就发出的旧消息"，
+// 已拒绝写入。调用方应当据此告知推送方本地也要删掉，否则那台设备会留下幽灵收藏。
+var ErrFavoriteResurrect = errors.New("favorite resurrect blocked by tombstone")
+
 // AddFavorite 以 LWW 语义写入收藏。
-// 若已存在且新 lamport 更小，则忽略（保证因果顺序不被旧操作覆盖）。
+//
+// 两层判定：
+//  1. 墓碑判定（跨删除/新增）：若该 (folder, source, comic_id) 在 lamport 更晚
+//     的时刻被删除过，这条 add 就是旧消息，直接拒绝并返回 ErrFavoriteResurrect。
+//     没有这一步的话，离线队列里迟到的 add 会把用户已经删掉的收藏加回来。
+//  2. 行内 LWW（新增/新增）：若已存在且新 lamport 更小，则忽略。
+//
+// 写入成功时清掉墓碑——用户重新收藏了，墓碑的使命结束。
 func (s *Store) AddFavorite(f model.Favorite, lamport int64) (bool, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	var tombLamport int64
+	var tombExists int
+	err = tx.QueryRow(
+		`SELECT lamport, 1 FROM favorite_tombstones
+		 WHERE folder = ? AND source = ? AND comic_id = ?`,
+		f.Folder, f.Source, f.ID,
+	).Scan(&tombLamport, &tombExists)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return false, err
+	}
+	if tombExists == 1 && tombLamport >= lamport {
+		// 删除发生在这次 add 之后 → 这是迟到的旧消息，拒绝。
+		return false, ErrFavoriteResurrect
+	}
+
 	tags, _ := json.Marshal(f.Tags)
-	res, err := s.db.Exec(
+	res, err := tx.Exec(
 		`INSERT INTO favorites(folder, source, comic_id, title, author, cover, tags,
 		    source_type, added_at, display_order, lamport)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -135,12 +168,35 @@ func (s *Store) AddFavorite(f model.Favorite, lamport int64) (bool, error) {
 		return false, err
 	}
 	n, _ := res.RowsAffected()
+	if n > 0 {
+		// 用户重新收藏了，墓碑的使命结束。
+		if _, err := tx.Exec(
+			`DELETE FROM favorite_tombstones
+			 WHERE folder = ? AND source = ? AND comic_id = ?`,
+			f.Folder, f.Source, f.ID,
+		); err != nil {
+			return false, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
 	return n > 0, nil
 }
 
-// RemoveFavorite 删除收藏。lamport 为墓碑时间戳，防止旧 add 复活。
-func (s *Store) RemoveFavorite(folder, source, comicID string) (bool, error) {
-	res, err := s.db.Exec(
+// RemoveFavorite 删除收藏，并写入墓碑防止旧 add 复活。
+//
+// lamport 是删除动作发生的时间戳：之后到达的、lamport 更小的 fav.add
+// 一律视为"删除前发出的旧消息"被拒绝。没有这个参数时，注释里承诺的
+// "防止旧 add 复活"只是一句空话。
+func (s *Store) RemoveFavorite(folder, source, comicID string, lamport int64) (bool, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	res, err := tx.Exec(
 		`DELETE FROM favorites WHERE folder = ? AND source = ? AND comic_id = ?`,
 		folder, source, comicID,
 	)
@@ -148,10 +204,30 @@ func (s *Store) RemoveFavorite(folder, source, comicID string) (bool, error) {
 		return false, err
 	}
 	n, _ := res.RowsAffected()
+
+	// 即使行不存在也要记墓碑：可能是重复的 remove，也可能是先删后到。
+	// 用 MAX 保留更晚的时间戳，避免一条迟到的 remove 把墓碑时间戳改旧。
+	if _, err := tx.Exec(
+		`INSERT INTO favorite_tombstones(folder, source, comic_id, lamport, deleted_at)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT(folder, source, comic_id) DO UPDATE SET
+		   lamport = MAX(excluded.lamport, favorite_tombstones.lamport),
+		   deleted_at = excluded.deleted_at`,
+		folder, source, comicID, lamport, time.Now().UnixMilli(),
+	); err != nil {
+		return false, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
 	return n > 0, nil
 }
 
 // MoveFavorite 把漫画从一个收藏夹移动到另一个。
+//
+// 源文件夹的删除同样要记墓碑，否则"移动到别的夹"之后，一条迟到的
+// 旧 add 会把它同时塞回源文件夹，表现为移动失败/重复出现。
 func (s *Store) MoveFavorite(f model.Favorite, fromFolder string, lamport int64) error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -160,6 +236,16 @@ func (s *Store) MoveFavorite(f model.Favorite, fromFolder string, lamport int64)
 	defer tx.Rollback()
 	if _, err := tx.Exec(`DELETE FROM favorites WHERE folder = ? AND source = ? AND comic_id = ?`,
 		fromFolder, f.Source, f.ID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO favorite_tombstones(folder, source, comic_id, lamport, deleted_at)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT(folder, source, comic_id) DO UPDATE SET
+		   lamport = MAX(excluded.lamport, favorite_tombstones.lamport),
+		   deleted_at = excluded.deleted_at`,
+		fromFolder, f.Source, f.ID, lamport, time.Now().UnixMilli(),
+	); err != nil {
 		return err
 	}
 	tags, _ := json.Marshal(f.Tags)
@@ -494,6 +580,21 @@ func (s *Store) GetCachedChapter(source, comicID, chapterID string) (*model.Cach
 }
 
 // ListCachedByComic 返回某漫画已缓存的所有章节。
+// HasCachedChapters 判断某漫画在库里是否已有缓存章节。
+//
+// 用途：入队前过滤"已经下完的书"，避免客户端重复推送收藏时
+// 把已完成的漫画重新排队（见 jobs.Enqueue 的说明）。
+func (s *Store) HasCachedChapters(source, comicID string) (bool, error) {
+	var n int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM cached_chapters WHERE source = ? AND comic_id = ? LIMIT 1`,
+		source, comicID).Scan(&n)
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 func (s *Store) ListCachedByComic(source, comicID string) ([]model.CachedChapter, error) {
 	rows, err := s.db.Query(
 		`SELECT source, comic_id, chapter_id, chapter_title, dir, page_count, cover, bytes, created_at

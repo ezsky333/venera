@@ -114,6 +114,7 @@ func (s *Server) Handler() http.Handler {
 	api.HandleFunc("POST /api/v1/download/covers", s.handleRefetchCovers)
 	api.HandleFunc("GET /api/v1/jobs", s.handleJobs)
 	api.HandleFunc("GET /api/v1/jobs/events", s.handleJobsEvents)
+	api.HandleFunc("GET /api/v1/jobs/by-comic", s.handleComicJobs)
 	api.HandleFunc("POST /api/v1/jobs/bulk", s.handleJobsBulk)
 	api.HandleFunc("GET /api/v1/jobs/{id}", s.handleJob)
 	api.HandleFunc("POST /api/v1/jobs/{id}/{action}", s.handleJobAction)
@@ -676,6 +677,11 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	id, err := s.worker.Enqueue(req.Source, req.ComicID, req.Title, "manual", req.Chapters)
 	if errors.Is(err, jobs.ErrAlreadyQueued) {
 		writeJSON(w, http.StatusConflict, map[string]any{"error": "already queued"})
+		return
+	}
+	// 已完整缓存：这不是错误，客户端按"无需重复下载"处理即可。
+	if errors.Is(err, jobs.ErrAlreadyCached) {
+		writeJSON(w, http.StatusConflict, map[string]any{"error": "already cached"})
 		return
 	}
 	if err != nil {

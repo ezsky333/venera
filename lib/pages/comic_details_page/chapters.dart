@@ -687,10 +687,72 @@ class _NasStoragePanelState extends State<_NasStoragePanel> {
   String? _error;
   final Set<String> _deleting = {};
 
+  /// 这本漫画的任务（下载中/排队/失败），带实时进度。
+  List<Map<String, dynamic>> _jobs = [];
+
+  /// SSE 订阅：只关心本漫画的 live 帧，用来刷新任务进度。
+  NasJobEventStream? _events;
+  StreamSubscription<NasJobEvent>? _eventSub;
+
+  /// jobId → 实时状态
+  Map<int, NasJobLive> _live = {};
+
   @override
   void initState() {
     super.initState();
-    _loadChapters();
+    _loadAll();
+    _connectEvents();
+  }
+
+  @override
+  void dispose() {
+    _eventSub?.cancel();
+    _events?.dispose();
+    super.dispose();
+  }
+
+  /// 订阅任务事件流：进度实时刷新，状态变化时重拉任务列表。
+  void _connectEvents() {
+    if (!NasClient.instance.isEnabled) return;
+    _events?.dispose();
+    _events = NasClient.instance.subscribeJobs();
+    _eventSub?.cancel();
+    _eventSub = _events!.stream.listen((ev) {
+      if (!mounted) return;
+      if (ev.live.isNotEmpty) {
+        // 只保留本漫画的任务帧
+        final mine = <int, NasJobLive>{};
+        for (final l in ev.live) {
+          if (l.source == widget.sourceKey && l.comicId == widget.comicId) {
+            mine[l.jobId] = l;
+          }
+        }
+        if (mine.isEmpty && _live.isEmpty) return;
+        setState(() => _live = mine);
+      } else {
+        // 任务集合可能变化（新入队/完成），重拉一次
+        _loadJobs(silent: true);
+      }
+    });
+    _events!.connect();
+  }
+
+  Future<void> _loadAll() async {
+    await Future.wait([_loadChapters(), _loadJobs()]);
+  }
+
+  Future<void> _loadJobs({bool silent = false}) async {
+    final list = await NasClient.instance.comicJobs(
+      sourceKey: widget.sourceKey,
+      comicId: widget.comicId,
+    );
+    if (!mounted) return;
+    setState(() {
+      _jobs = list ?? const [];
+    });
+    if (!silent && list == null) {
+      // 任务接口失败不影响章节展示，静默即可
+    }
   }
 
   Future<void> _loadChapters() async {
@@ -749,6 +811,14 @@ class _NasStoragePanelState extends State<_NasStoragePanel> {
               ),
             ),
             const SizedBox(height: 12),
+            // ---- 这本漫画的下载任务（实时进度）----
+            // 放在章节清单**之前**：用户打开面板最想确认的是
+            // "我刚点的下载到底在跑没有、跑到哪了"，
+            // 已缓存的章节是静态结果，放后面。
+            if (_activeJobs.isNotEmpty) ...[
+              _buildJobsSection(theme),
+              const Divider(),
+            ],
             if (_loading)
               const Padding(
                 padding: EdgeInsets.symmetric(vertical: 32),
@@ -789,8 +859,200 @@ class _NasStoragePanelState extends State<_NasStoragePanel> {
     );
   }
 
-  Widget _buildSummary(ThemeData theme) {
-    final chapters = _chapters ?? [];
+  /// 需要展示的任务：进行中/排队/失败/暂停。
+  ///
+  /// 已完成的排除掉——它的结果已经体现在下面的"已缓存章节"里，
+  /// 再列一遍只会让面板变长。
+  List<Map<String, dynamic>> get _activeJobs => _jobs.where((j) {
+        final st = j['status']?.toString() ?? '';
+        return st == 'running' || st == 'pending' ||
+            st == 'paused' || st == 'failed';
+      }).toList();
+
+  static String _fmtSpeed(double bps) {
+    if (bps <= 0) return '';
+    const units = ['B/s', 'KB/s', 'MB/s'];
+    var v = bps;
+    var i = 0;
+    while (v >= 1024 && i < units.length - 1) {
+      v /= 1024;
+      i++;
+    }
+    return '${v.toStringAsFixed(v >= 100 || i == 0 ? 0 : 1)} ${units[i]}';
+  }
+
+  /// 任务区块：每条任务一行，带实时进度条 / 页数 / 速度 / 取消按钮。
+  Widget _buildJobsSection(ThemeData theme) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(Icons.downloading, size: 16, color: theme.colorScheme.primary),
+            const SizedBox(width: 6),
+            Text(
+              "Download tasks".tl,
+              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(width: 6),
+            Text(
+              '(${_activeJobs.length})',
+              style: TextStyle(
+                fontSize: 12,
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 6),
+        ConstrainedBox(
+          constraints: const BoxConstraints(maxHeight: 220),
+          child: ListView.builder(
+            shrinkWrap: true,
+            itemCount: _activeJobs.length,
+            itemBuilder: (_, i) => _buildJobRow(_activeJobs[i], theme),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildJobRow(Map<String, dynamic> job, ThemeData theme) {
+    final id = (job['id'] as num?)?.toInt() ?? 0;
+    final status = job['status']?.toString() ?? '';
+    final live = _live[id];
+
+    // 实时帧优先；数据库里的值是 5 秒检查点
+    final progress = live != null && live.status == 'running'
+        ? live.progress
+        : (job['progress'] as num?)?.toDouble() ?? 0;
+    final pct = (progress.clamp(0.0, 1.0) * 100).round();
+    final speed = live != null && live.status == 'running'
+        ? _fmtSpeed(live.speedBps)
+        : '';
+    final pages = live != null && live.imageTotal > 0
+        ? '${live.imageDone}/${live.imageTotal}'
+        : '';
+    final message = live?.message.isNotEmpty == true
+        ? live!.message
+        : (job['message']?.toString() ?? '');
+    final error = job['error']?.toString() ?? '';
+
+    late Color color;
+    late String label;
+    switch (status) {
+      case 'running':
+        color = theme.colorScheme.primary;
+        label = "Downloading".tl;
+        break;
+      case 'failed':
+        color = theme.colorScheme.error;
+        label = "Failed".tl;
+        break;
+      case 'paused':
+        color = Colors.orange;
+        label = "Paused".tl;
+        break;
+      default:
+        color = Colors.orange;
+        label = "Queued".tl;
+    }
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 5),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Text(label,
+                  style: TextStyle(
+                      fontSize: 12, color: color, fontWeight: FontWeight.w600)),
+              const SizedBox(width: 8),
+              if (status == 'running') ...[
+                Text('$pct%',
+                    style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: color)),
+                if (pages.isNotEmpty) ...[
+                  const SizedBox(width: 6),
+                  Text('$pages ${"pages".tl}',
+                      style: TextStyle(
+                          fontSize: 11,
+                          color: theme.colorScheme.onSurfaceVariant)),
+                ],
+                if (speed.isNotEmpty) ...[
+                  const SizedBox(width: 6),
+                  Text(speed,
+                      style: TextStyle(
+                          fontSize: 11,
+                          color: theme.colorScheme.onSurfaceVariant)),
+                ],
+              ],
+              const Spacer(),
+              if (status == 'running' ||
+                  status == 'pending' ||
+                  status == 'paused')
+                SizedBox(
+                  height: 26,
+                  child: TextButton(
+                    style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      minimumSize: Size.zero,
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                    onPressed: () async {
+                      final ok = await NasClient.instance.cancelJob(id);
+                      if (!mounted) return;
+                      if (ok) {
+                        context.showMessage(message: "Cancelled".tl);
+                        _loadJobs(silent: true);
+                      }
+                    },
+                    child: Text("Cancel".tl,
+                        style: TextStyle(
+                            fontSize: 12, color: theme.colorScheme.error)),
+                  ),
+                ),
+            ],
+          ),
+          if (status == 'running' || status == 'pending')
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(2),
+                child: LinearProgressIndicator(
+                  value: status == 'running' ? progress.clamp(0.0, 1.0) : null,
+                  minHeight: 4,
+                ),
+              ),
+            ),
+          if (message.isNotEmpty && status != 'failed')
+            Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text(message,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                      fontSize: 11,
+                      color: theme.colorScheme.onSurfaceVariant)),
+            ),
+          if (error.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text(error,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                      fontSize: 11, color: theme.colorScheme.error)),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSummary(ThemeData theme) {    final chapters = _chapters ?? [];
     var bytes = 0;
     var pages = 0;
     for (final c in chapters) {

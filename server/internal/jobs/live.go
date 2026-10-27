@@ -18,6 +18,12 @@ import (
 //   - SQLite 只做检查点（每 5 秒或状态跃变时落一次）
 type Live struct {
 	JobID int64 `json:"jobId"`
+	// Source / ComicID 让客户端能把实时帧关联到具体漫画。
+	//
+	// 详情页的"NAS 存储面板"只关心**当前这本**漫画的下载进度，
+	// 没有这两个字段就只能按 jobId 逐个反查，多一次往返且易错。
+	Source  string `json:"source"`
+	ComicID string `json:"comicId"`
 	// Progress 是整本进度 0..1。
 	Progress float64 `json:"progress"`
 	// 当前章节信息。

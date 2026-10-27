@@ -56,9 +56,9 @@ func Open(dataDir, libraryDir string) (*Store, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
-func (s *Store) DB() *sql.DB          { return s.db }
-func (s *Store) DataDir() string      { return s.dataDir }
-func (s *Store) LibraryDir() string   { return s.libraryDir }
+func (s *Store) DB() *sql.DB        { return s.db }
+func (s *Store) DataDir() string    { return s.dataDir }
+func (s *Store) LibraryDir() string { return s.libraryDir }
 
 // Videos/Images 的落盘根目录，与 App 的 LocalManager 布局保持一致。
 func (s *Store) LibraryPath(rel string) string {
@@ -123,6 +123,27 @@ func (s *Store) migrate() error {
 			PRIMARY KEY (folder, source, comic_id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_favorites_comic ON favorites(source, comic_id)`,
+		// 收藏墓碑：记录"这一项在 lamport 时刻被删除了"。
+		//
+		// 为什么必须有：favorites 是集合语义，删除就是一行 DELETE。
+		// 一旦行没了，就再也分不清"从来没收藏过"和"收藏过又删了"。
+		// 于是任何一条迟到的 fav.add（离线队列、重装后的 bootstrap 全量重推、
+		// 别的设备还没同步到删除）都会把已删除的收藏重新加回来——
+		// 实测确认过：remove 之后再推一条 add，收藏确实复活。
+		//
+		// 墓碑保留删除时刻的 lamport，AddFavorite 据此判断这条 add 是
+		// "删除之前就发出的旧消息"（拒绝）还是"用户后来重新收藏"（接受）。
+		// 接受时把墓碑删掉，否则表会无限增长。
+		`CREATE TABLE IF NOT EXISTS favorite_tombstones (
+			folder      TEXT NOT NULL,
+			source      TEXT NOT NULL,
+			comic_id    TEXT NOT NULL,
+			lamport     INTEGER NOT NULL DEFAULT 0,
+			deleted_at  INTEGER,
+			PRIMARY KEY (folder, source, comic_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_tombstones_comic
+			ON favorite_tombstones(source, comic_id)`,
 		`CREATE TABLE IF NOT EXISTS histories (
 			source      TEXT NOT NULL,
 			comic_id    TEXT NOT NULL,
@@ -263,7 +284,9 @@ func (s *Store) ensureColumn(table, column, decl string) error {
 }
 
 func min(a, b int) int {
-	if a < b { return a }
+	if a < b {
+		return a
+	}
 	return b
 }
 

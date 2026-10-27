@@ -193,9 +193,27 @@ func isRetriableError(msg string) bool {
 }
 
 // Enqueue 为一个漫画排队下载，带去重。
+//
+// 两层去重：
+//  1. 已有 pending/running 的同书任务 → ErrAlreadyQueued；
+//  2. **库里已有缓存且无指定章节** → ErrAlreadyCached。
+//
+// 第 2 条是这次踩出来的：客户端每次启动都会 syncNow(full: true)，
+// 把本地全部收藏重新推成 fav.add，服务端对每条新落库的收藏调用
+// Enqueue。由于这里只查 "有没有待执行任务"，已经下完的书会被
+// 反复重新排队——实测一次 App 重启就凭空多出 442 个 pending
+// （picacg 222 / jm 60 / ehentai 18 / wnacg 21），把队列堵死。
+//
+// 注意：显式指定 chapters 时不算重复——那是用户手动"补下某几章"，
+// 即使整本已缓存也应允许。
 func (w *Worker) Enqueue(source, comicID, title, origin string, chapters []string) (int64, error) {
 	if exists, err := w.st.PendingJobExists(source, comicID); err == nil && exists {
 		return 0, ErrAlreadyQueued
+	}
+	if len(chapters) == 0 {
+		if cached, err := w.st.HasCachedChapters(source, comicID); err == nil && cached {
+			return 0, ErrAlreadyCached
+		}
 	}
 	return w.st.CreateJob(&model.Job{
 		Source: source, ComicID: comicID, Title: title,
@@ -206,6 +224,9 @@ func (w *Worker) Enqueue(source, comicID, title, origin string, chapters []strin
 // ErrAlreadyQueued 表示同一漫画已有待执行任务。
 var ErrAlreadyQueued = fmt.Errorf("already queued")
 
+// ErrAlreadyCached 表示该漫画已经完整缓存，无需重新下载。
+var ErrAlreadyCached = fmt.Errorf("already cached")
+
 // QueueFavorites 把收藏的漫画批量排队（跳过已缓存的）。
 func (w *Worker) QueueFavorites() (queued int, err error) {
 	favs, err := w.st.AllFavoriteComics()
@@ -214,6 +235,11 @@ func (w *Worker) QueueFavorites() (queued int, err error) {
 	}
 	for _, f := range favs {
 		if exists, _ := w.st.PendingJobExists(f.Source, f.ID); exists {
+			continue
+		}
+		// 已缓存的跳过：这个入口明确是"补下没下过的收藏"，
+		// 重复排队只会白跑 loadInfo/loadEp 再全部 skip。
+		if cached, _ := w.st.HasCachedChapters(f.Source, f.ID); cached {
 			continue
 		}
 		if _, err := w.st.CreateJob(&model.Job{

@@ -6,6 +6,8 @@
 // （例如冷启动早期、或某些 ABI 上初始化失败），所有请求都会抛
 //   Bad state: flutter_rust_bridge has not been initialized
 // NAS 是纯 HTTP/JSON，用系统 HTTP 栈更可靠，也避免和 Rust 生命周期耦合。
+import 'dart:async';
+import 'dart:convert' show jsonDecode, Utf8Decoder, LineSplitter;
 import 'dart:io' show HttpClient, Platform;
 import 'dart:typed_data' show Uint8List;
 
@@ -387,6 +389,12 @@ class NasClient {
       } else {
         _config = const NasConfig(baseUrl: '', token: '', clientId: '');
       }
+      // 游标以 implicitData 为准：它是每次同步后单独落盘的，
+      // settings['nas'] 里的那份只在 saveData() 时才刷新，可能是旧的。
+      final cursor = appdata.implicitData['nasCursor'];
+      if (cursor is num && cursor.toInt() > _config.cursor) {
+        _config = _config.copyWith(cursor: cursor.toInt());
+      }
     } catch (e) {
       Log.error('NAS', 'load config failed: $e');
     }
@@ -671,9 +679,52 @@ class NasClient {
     }
   }
 
+  /// 订阅 NAS 任务的实时进度（SSE）。
+  ///
+  /// 服务端 `GET /api/v1/jobs/events` 推两类事件：
+  ///   - `live`：实时进度帧（进度/页数/字节/速度），200ms 合并推送；
+  ///   - `jobs`：任务列表快照（状态集合变化时）。
+  ///
+  /// 为什么不用轮询：进度每张图都在变，5 秒轮询既慢又浪费；
+  /// 服务端已经把这些数据放在内存里按帧推送，端上直接用即可。
+  ///
+  /// 连接失败/断开时自动重连（指数退避，最长 30 秒）。
+  /// 返回的 [NasJobEventStream] 必须 dispose，否则连接泄漏。
+  NasJobEventStream subscribeJobs({String? status}) {
+    return NasJobEventStream(
+      baseUrl: _config.baseUrl,
+      token: _config.token,
+      status: status,
+    );
+  }
+
+  /// 取某本漫画在 NAS 上的任务（含实时进度）。
+  ///
+  /// 与 [jobs] 的区别：那个列全部任务；这个只返回 (source, comicId)
+  /// 匹配的任务，用于详情页的存储面板——用户要看的是"我这本下到哪了"。
+  /// 返回 null 表示请求失败。
+  Future<List<Map<String, dynamic>>?> comicJobs({
+    required String sourceKey,
+    required String comicId,
+  }) async {
+    if (!isEnabled) return null;
+    final dio = _dio;
+    if (dio == null) return null;
+    try {
+      final res = await dio.get('/api/v1/jobs/by-comic', queryParameters: {
+        'source': sourceKey,
+        'comicId': comicId,
+      });
+      if (res.statusCode != 200 || res.data is! Map) return null;
+      final list = (res.data['jobs'] as List?) ?? [];
+      return list.map((e) => Map<String, dynamic>.from(e as Map)).toList();
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// 列出 NAS 库内容。
-  Future<List<NasLibraryItem>> library() async {
-    if (!isEnabled) return [];
+  Future<List<NasLibraryItem>> library() async {    if (!isEnabled) return [];
     final dio = _dio;
     if (dio == null) return [];
     try {
@@ -879,12 +930,20 @@ class NasClient {
   }
 
   /// 更新本地记录的同步游标。
+  ///
+  /// 游标必须真正落盘，否则"同步过什么"这件事会在进程被杀后丢失：
+  /// 下次启动从旧游标重新拉同一批操作，表现为每次开 App 都提示
+  /// "检测到云端数据有更新"。实测就是 force-stop 后游标回到上一次的
+  /// 值（服务端日志里同一批 op 被反复 pull）。
+  ///
+  /// 用 implicitData 而不是 settings 落盘：settings 走 appdata.saveData()
+  /// 会把整个 appdata.json 重写一遍，而游标每次同步都会变。
   Future<void> updateCursor(int cursor) async {
     if (_config.cursor == cursor) return;
     _config = _config.copyWith(cursor: cursor);
     appdata.settings['nas'] = _config.toJson();
-    // 游标属于高频变更，不触发完整保存，仅写 implicitData 减少 IO
     appdata.implicitData['nasCursor'] = cursor;
+    await appdata.writeImplicitData();
   }
 
   /// 生成一个稳定的客户端 ID（首次使用时创建）。
@@ -948,4 +1007,212 @@ class NasLibraryIndex {
   void invalidate() {
     _loadedAt = DateTime.fromMillisecondsSinceEpoch(0);
   }
+}
+
+/// NAS 任务的实时进度快照（对应服务端 jobs.Live）。
+class NasJobLive {
+  const NasJobLive({
+    required this.jobId,
+    required this.progress,
+    required this.chapterIndex,
+    required this.chapterTotal,
+    required this.chapterTitle,
+    required this.imageDone,
+    required this.imageTotal,
+    required this.bytes,
+    required this.speedBps,
+    required this.status,
+    required this.message,
+    this.source = '',
+    this.comicId = '',
+  });
+
+  final int jobId;
+  final double progress;
+  final int chapterIndex;
+  final int chapterTotal;
+  final String chapterTitle;
+  final int imageDone;
+  final int imageTotal;
+  final int bytes;
+  final double speedBps;
+  final String status;
+  final String message;
+
+  /// 任务归属的漫画（详情页据此只显示自己这本的进度）。
+  final String source;
+  final String comicId;
+
+  static NasJobLive fromJson(Map<String, dynamic> m) => NasJobLive(
+        jobId: (m['jobId'] as num?)?.toInt() ?? 0,
+        progress: (m['progress'] as num?)?.toDouble() ?? 0,
+        chapterIndex: (m['chapterIndex'] as num?)?.toInt() ?? 0,
+        chapterTotal: (m['chapterTotal'] as num?)?.toInt() ?? 0,
+        chapterTitle: m['chapterTitle']?.toString() ?? '',
+        imageDone: (m['imageDone'] as num?)?.toInt() ?? 0,
+        imageTotal: (m['imageTotal'] as num?)?.toInt() ?? 0,
+        bytes: (m['bytes'] as num?)?.toInt() ?? 0,
+        speedBps: (m['speedBps'] as num?)?.toDouble() ?? 0,
+        status: m['status']?.toString() ?? '',
+        message: m['message']?.toString() ?? '',
+        source: m['source']?.toString() ?? '',
+        comicId: m['comicId']?.toString() ?? '',
+      );
+}
+
+/// NAS 任务事件流（SSE）。
+///
+/// 用 dart:io 的 HttpClient 手工解析 `text/event-stream`：
+/// Flutter 生态没有稳定的 SSE 包，而协议本身极简
+/// （`event: x` / `data: y` 两行 + 空行分隔），手写反而更可控。
+///
+/// 断线自动重连（指数退避 1s→30s），dispose 后彻底停止。
+class NasJobEventStream {
+  NasJobEventStream({
+    required this.baseUrl,
+    required this.token,
+    this.status,
+  });
+
+  final String baseUrl;
+  final String token;
+  final String? status;
+
+  final _controller = StreamController<NasJobEvent>.broadcast();
+  Stream<NasJobEvent> get stream => _controller.stream;
+
+  HttpClient? _client;
+  StreamSubscription<String>? _sub;
+  bool _disposed = false;
+  int _retry = 0;
+  Timer? _retryTimer;
+
+  /// 建立连接（可重复调用；内部会先断旧连接）。
+  Future<void> connect() async {
+    if (_disposed) return;
+    await _closeConnection();
+    if (_disposed) return;
+
+    final uri = Uri.parse(
+      '${baseUrl.replaceAll(RegExp(r'/+$'), '')}/api/v1/jobs/events'
+      '?token=${Uri.encodeQueryComponent(token)}'
+      '${status != null && status!.isNotEmpty ? '&status=${Uri.encodeQueryComponent(status!)}' : ''}',
+    );
+
+    try {
+      final client = HttpClient()
+        ..connectionTimeout = const Duration(seconds: 10)
+        // 局域网直连，不能走用户代理
+        ..findProxy = ((_) => 'DIRECT');
+      _client = client;
+      final req = await client.getUrl(uri);
+      req.headers.set('Accept', 'text/event-stream');
+      final resp = await req.close();
+      if (resp.statusCode != 200) {
+        throw StateError('SSE HTTP ${resp.statusCode}');
+      }
+      _retry = 0;
+
+      // 按行解析 SSE；EventSource 的语义是事件之间用空行分隔
+      final buffer = StringBuffer();
+      String? evName;
+      final dataLines = <String>[];
+
+      _sub = resp
+          .transform(const Utf8Decoder(allowMalformed: true))
+          .transform(const LineSplitter())
+          .listen(
+        (line) {
+          if (line.isEmpty) {
+            // 一帧结束
+            if (dataLines.isNotEmpty) {
+              final raw = dataLines.join('\n');
+              final name = evName ?? 'message';
+              _emit(name, raw);
+            }
+            evName = null;
+            dataLines.clear();
+            return;
+          }
+          if (line.startsWith(':')) return; // 心跳注释
+          if (line.startsWith('event:')) {
+            evName = line.substring(6).trim();
+          } else if (line.startsWith('data:')) {
+            dataLines.add(line.substring(5).trimLeft());
+          }
+        },
+        onError: (_) => _scheduleReconnect(),
+        onDone: _scheduleReconnect,
+        cancelOnError: true,
+      );
+      buffer.clear();
+    } catch (_) {
+      _scheduleReconnect();
+    }
+  }
+
+  void _emit(String event, String raw) {
+    if (_disposed) return;
+    try {
+      final decoded = jsonDecode(raw);
+      if (event == 'live') {
+        final list = (decoded as List)
+            .whereType<Map>()
+            .map((e) => NasJobLive.fromJson(Map<String, dynamic>.from(e)))
+            .toList();
+        _controller.add(NasJobEvent.live(list));
+      } else if (event == 'jobs') {
+        final list = (decoded as List)
+            .whereType<Map>()
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList();
+        _controller.add(NasJobEvent.jobs(list));
+      }
+    } catch (_) {
+      // 坏帧直接丢弃，不影响后续
+    }
+  }
+
+  void _scheduleReconnect() {
+    if (_disposed) return;
+    _closeConnection();
+    _retry = _retry < 5 ? _retry + 1 : 5;
+    // 1s,2s,4s,8s,16s, 上限 30s
+    final delay = Duration(seconds: (1 << (_retry - 1)).clamp(1, 30));
+    _retryTimer?.cancel();
+    _retryTimer = Timer(delay, () {
+      if (!_disposed) connect();
+    });
+  }
+
+  Future<void> _closeConnection() async {
+    await _sub?.cancel();
+    _sub = null;
+    _client?.close(force: true);
+    _client = null;
+  }
+
+  /// 停止订阅并释放连接。
+  void dispose() {
+    _disposed = true;
+    _retryTimer?.cancel();
+    _retryTimer = null;
+    _closeConnection();
+    _controller.close();
+  }
+}
+
+/// 一帧任务事件：实时进度或任务列表。
+class NasJobEvent {
+  const NasJobEvent._(this.live, this.jobs);
+
+  factory NasJobEvent.live(List<NasJobLive> items) =>
+      NasJobEvent._(items, const []);
+  factory NasJobEvent.jobs(List<Map<String, dynamic>> items) =>
+      NasJobEvent._(const [], items);
+
+  final List<NasJobLive> live;
+  final List<Map<String, dynamic>> jobs;
+
+  bool get isLive => live.isNotEmpty || jobs.isEmpty;
 }

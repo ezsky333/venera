@@ -262,7 +262,10 @@ func (d *Downloader) RunJob(jobID int64, detail *model.ComicDetail) error {
 		progress := float64(i) / float64(total)
 		d.reportProgress(jobID, model.JobRunning, progress,
 			fmt.Sprintf("downloading chapter %d/%d: %s", i+1, total, ch.Title),
-			Live{ChapterIndex: i + 1, ChapterTotal: total, ChapterTitle: ch.Title})
+			Live{
+				Source: detail.Source, ComicID: detail.ID,
+				ChapterIndex: i + 1, ChapterTotal: total, ChapterTitle: ch.Title,
+			})
 
 		// ---- 章内进度：内存实时，数据库只做检查点 ----
 		//
@@ -307,7 +310,11 @@ func (d *Downloader) RunJob(jobID int64, detail *model.ComicDetail) error {
 
 			if d.hub != nil {
 				d.hub.Report(Live{
-					JobID: jobID, Progress: p, Bytes: b,
+					JobID: jobID,
+					// 带上身份字段：客户端按 (source, comicId) 过滤，
+					// 详情页的存储面板只显示当前这本的进度。
+					Source: detail.Source, ComicID: detail.ID,
+					Progress: p, Bytes: b,
 					ChapterIndex: i + 1, ChapterTotal: total, ChapterTitle: ch.Title,
 					ImageDone: done, ImageTotal: totalImgs,
 					Status: string(model.JobRunning),

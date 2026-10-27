@@ -162,6 +162,16 @@ func (s *Syncer) apply(clientID string, op PushOp, lamport int64) (bool, string,
 		}
 		changed, err := s.st.AddFavorite(fav, lamport)
 		if err != nil {
+			if errors.Is(err, store.ErrFavoriteResurrect) {
+				// 这条 add 比墓碑更旧：用户已经删掉了它。
+				// 不能静默丢弃——推送方本地还留着这条收藏（它是从本地
+				// 队列里发出来的），必须让它知道要删掉，否则那台设备上
+				// 会一直留着一个别的设备都看不到的幽灵收藏。
+				return false,
+					fmt.Sprintf("favorite resurrect blocked: %s/%s/%s",
+						payload.Folder, payload.Source, payload.ComicID),
+					nil, nil
+			}
 			return false, "", nil, err
 		}
 		// 顺带缓存漫画元信息
@@ -173,7 +183,7 @@ func (s *Syncer) apply(clientID string, op PushOp, lamport int64) (bool, string,
 		if err != nil {
 			return false, "", nil, err
 		}
-		changed, err := s.st.RemoveFavorite(payload.Folder, payload.Source, payload.ComicID)
+		changed, err := s.st.RemoveFavorite(payload.Folder, payload.Source, payload.ComicID, lamport)
 		if err != nil {
 			return false, "", nil, err
 		}
@@ -391,12 +401,12 @@ func (s *Syncer) Pull(req PullRequest) (*PullResponse, error) {
 
 // Snapshot 是服务端当前状态的完整快照，用于客户端首次接入或游标过期后的重建。
 type Snapshot struct {
-	Favorites map[string][]FavoriteView      `json:"favorites"`
-	Histories []HistoryView                  `json:"histories"`
-	Settings  map[string]json.RawMessage     `json:"settings,omitempty"`
-	Sources   []store.SourceInfo             `json:"sources,omitempty"`
-	Cursor    int64                          `json:"cursor"`
-	At        time.Time                      `json:"at"`
+	Favorites map[string][]FavoriteView  `json:"favorites"`
+	Histories []HistoryView              `json:"histories"`
+	Settings  map[string]json.RawMessage `json:"settings,omitempty"`
+	Sources   []store.SourceInfo         `json:"sources,omitempty"`
+	Cursor    int64                      `json:"cursor"`
+	At        time.Time                  `json:"at"`
 }
 
 // FavoriteView 是发给客户端的收藏条目。

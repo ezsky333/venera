@@ -1,6 +1,11 @@
 part of "components.dart";
 
-void showToast({
+/// 显示一条底部提示。
+///
+/// 返回一个"立刻收起"的回调。需要提前结束提示时必须用它，
+/// 而不是再弹一条新的：OverlayWidget 允许同一位置存在多条提示，
+/// 不收起旧的会和新提示完全重叠（例如"同步中"要换成"同步完成"）。
+VoidCallback showToast({
   required String message,
   required BuildContext context,
   Widget? icon,
@@ -18,7 +23,18 @@ void showToast({
 
   state?.addOverlay(newEntry);
 
-  Timer(Duration(seconds: seconds ?? 2), () => state?.remove(newEntry));
+  var dismissed = false;
+  Timer? timer;
+
+  void dismiss() {
+    if (dismissed) return;
+    dismissed = true;
+    timer?.cancel();
+    state?.remove(newEntry);
+  }
+
+  timer = Timer(Duration(seconds: seconds ?? 2), dismiss);
+  return dismiss;
 }
 
 class _ToastOverlay extends StatelessWidget {

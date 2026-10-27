@@ -197,7 +197,79 @@ func (s *Server) handleJobsEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// 批量操作：暂停全部 pending / 重试全部 failed（复用现有 store 方法）。
+// handleComicJobs 返回**某一本漫画**的全部任务（含实时进度）。
+//   GET /api/v1/jobs/by-comic?source=&comicId=
+//
+// 用途：详情页的 NAS 存储面板要在同一个弹窗里同时展示
+//   - 已缓存的章节（来自 library 接口）
+//   - 正在下载 / 排队中 / 失败的章节任务（来自这里）
+//
+// 与 /api/v1/jobs/events 的分工：SSE 负责"变化时推送"，
+// 这个接口负责"打开弹窗时拿到初始快照"，两者组合即可实时。
+//
+// 返回的每项都合并了内存里的实时状态（进度/页数/速度），
+// 因此客户端不用再逐个查 /jobs/{id}。
+func (s *Server) handleComicJobs(w http.ResponseWriter, r *http.Request) {
+	srcKey := r.URL.Query().Get("source")
+	comicID := r.URL.Query().Get("comicId")
+	if srcKey == "" || comicID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error": "source and comicId are required",
+		})
+		return
+	}
+
+	out := []map[string]any{}
+
+	// 数据库里的任务（可能有同一本的多条历史记录）
+	rows, err := s.st.DB().Query(`
+		SELECT id, status, progress, message, COALESCE(error,''), COALESCE(origin,''),
+		       COALESCE(title,''), COALESCE(chapters,''), created_at
+		FROM jobs WHERE source = ? AND comic_id = ?
+		ORDER BY id DESC LIMIT 20`, srcKey, comicID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			id        int64
+			status    string
+			progress  float64
+			message   string
+			errMsg    string
+			origin    string
+			title     string
+			chapters  string
+			createdAt int64
+		)
+		if err := rows.Scan(&id, &status, &progress, &message, &errMsg,
+			&origin, &title, &chapters, &createdAt); err != nil {
+			continue
+		}
+		item := map[string]any{
+			"id": id, "status": status, "progress": progress,
+			"message": message, "error": errMsg, "origin": origin,
+			"title": title, "createdAt": createdAt,
+		}
+		// 合并实时状态：数据库是 5 秒检查点，内存里才是最新值
+		if s.hub != nil {
+			if l, ok := s.hub.Get(id); ok {
+				item["live"] = l
+				item["progress"] = l.Progress
+				item["status"] = l.Status
+			}
+		}
+		out = append(out, item)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"source": srcKey, "comicId": comicID, "jobs": out,
+	})
+}
+
+// handleJobsBulk 批量操作：暂停全部 pending / 重试全部 failed。
 //   POST /api/v1/jobs/bulk  body: {"action": "pause-all"|"resume-all"|"retry-failed"}
 func (s *Server) handleJobsBulk(w http.ResponseWriter, r *http.Request) {
 	var req struct {

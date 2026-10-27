@@ -14,9 +14,92 @@ import 'package:venera/foundation/nas_client.dart';
 import 'package:venera/utils/nas_cookie_export.dart';
 import 'package:venera/utils/nas_settings_sync.dart';
 
+/// 一次同步的结局。
+///
+/// 存在的意义是让调用方（启动流程）能区分"云端本来就没有新东西"和
+/// "拉到了新东西"——两者的提示文案完全不同，而早期实现只有
+/// `lastError` 一个字段，成功与"无事可做"无法分辨。
+enum NasSyncOutcome {
+  /// 云端没有新数据（本地也没有需要补推的内容）。
+  upToDate,
+
+  /// 云端有新数据，且已经应用完毕。
+  updated,
+
+  /// 服务端不可达，或中途抛异常。
+  failed,
+
+  /// NAS 未启用，什么都没做。
+  disabled,
+
+  /// 已经有一次同步在跑，本次直接放弃（避免重复提示）。
+  busy,
+}
+
+/// [NasSync.syncNow] 的返回值。
+class NasSyncResult {
+  const NasSyncResult(
+    this.outcome, {
+    this.pulled = 0,
+    this.pushed = 0,
+    this.error,
+  });
+
+  final NasSyncOutcome outcome;
+
+  /// 从云端拉到并应用到本地的条目数。
+  final int pulled;
+
+  /// 推送到云端的操作数。
+  final int pushed;
+
+  final String? error;
+
+  @override
+  String toString() =>
+      'NasSyncResult(${outcome.name}, pulled=$pulled, pushed=$pushed'
+      '${error != null ? ', error=$error' : ''})';
+}
+
+/// 一条"被墓碑拒绝"的收藏，需要在本地删掉。
+class ResurrectedFavorite {
+  const ResurrectedFavorite(this.folder, this.source, this.comicId);
+
+  final String folder;
+  final String source;
+  final String comicId;
+
+  @override
+  String toString() => 'ResurrectedFavorite($folder/$source/$comicId)';
+}
+
+/// 服务端拒绝 `fav.add` 时返回的警告前缀。
+const _resurrectPrefix = 'favorite resurrect blocked:';
+
+/// 从 push 响应的 warnings 里解析出需要本地删除的收藏。
+///
+/// 单独抽出来是为了可测试：comicId 里**可以带斜杠**（ehentai 的 id 就是
+/// 一个 URL，如 `https://e-hentai.org/g/123/abc/`），所以不能简单地
+/// `split('/')` 取第三段，必须把第三段之后的全部拼回去，否则删错对象。
+List<ResurrectedFavorite> parseResurrectWarnings(dynamic raw) {
+  final out = <ResurrectedFavorite>[];
+  if (raw is! List) return out;
+  for (final w in raw) {
+    final text = w?.toString() ?? '';
+    if (!text.startsWith(_resurrectPrefix)) continue;
+    final parts = text.substring(_resurrectPrefix.length).trim().split('/');
+    if (parts.length < 3) continue;
+    final folder = parts[0];
+    final source = parts[1];
+    final comicId = parts.sublist(2).join('/');
+    if (folder.isEmpty || comicId.isEmpty) continue;
+    out.add(ResurrectedFavorite(folder, source, comicId));
+  }
+  return out;
+}
+
 class NasSync with ChangeNotifier {
   static NasSync? _instance;
-
   factory NasSync() => _instance ?? NasSync._create();
 
   NasSync._create();
@@ -45,10 +128,21 @@ class NasSync with ChangeNotifier {
 
   bool get isEnabled => NasClient.instance.isEnabled;
 
-  /// 启动时调用：设置页启用后，做一次全量对齐。
-  Future<void> start() async {
-    if (!isEnabled) return;
-    await syncNow(full: true);
+  /// 启动时调用。
+  ///
+  /// 关键：**只有游标缺失时**才做全量对齐（full: true）。
+  ///
+  /// 原实现无条件 `syncNow(full: true)`，导致每次 App 启动都会
+  /// `_bootstrapPush` 把本地全部收藏重新推成 fav.add；服务端对每条
+  /// 新落库的收藏调 Enqueue，于是一次重启就能凭空造出几百个下载
+  /// 任务（实测 442 条，把队列堵死）。
+  ///
+  /// 游标存在说明"这台设备已经和服务端对齐过"，增量拉取即可——
+  /// 增量同样能拿到别的设备新增的收藏。
+  Future<NasSyncResult> start({void Function()? onRemoteChanges}) async {
+    if (!isEnabled) return const NasSyncResult(NasSyncOutcome.disabled);
+    final hasCursor = NasClient.instance.config.cursor > 0;
+    return syncNow(full: !hasCursor, onRemoteChanges: onRemoteChanges);
   }
 
   /// 记录一条收藏新增。
@@ -186,26 +280,29 @@ class NasSync with ChangeNotifier {
   }
 
   /// 把待上传操作推送到服务端。
-  Future<void> flush() async {
-    if (!isEnabled || _pendingOps.isEmpty) return;
+  /// 返回成功推送到服务端的操作数（0 表示没有待推内容或推送失败）。
+  Future<int> flush() async {
+    if (!isEnabled || _pendingOps.isEmpty) return 0;
     final client = NasClient.instance;
-    if (!await client.probe()) return;
+    if (!await client.probe()) return 0;
 
     // 取快照并清空（失败时回滚）
     final batch = List<Map<String, dynamic>>.from(_pendingOps);
     _pendingOps.clear();
 
+    var sent = 0;
     try {
       var dio = _dio(client);
       if (dio == null) {
         _pendingOps.insertAll(0, batch);
-        return;
+        return 0;
       }
+      var ops = _dedupe(batch);
       var res = await dio.post('/api/v1/sync/push', data: {
         'clientId': client.config.clientId,
         'deviceName': _deviceName(),
         'lamport': DateTime.now().millisecondsSinceEpoch,
-        'ops': _dedupe(batch),
+        'ops': ops,
       });
       if (res.statusCode == 200 && res.data is Map) {
         var cursor = (res.data['cursor'] as num?)?.toInt();
@@ -213,6 +310,8 @@ class NasSync with ChangeNotifier {
           await client.updateCursor(cursor);
         }
         _lastError = null;
+        sent = ops.length;
+        _applyWarnings(res.data['warnings']);
       } else {
         _lastError = 'push failed: ${res.statusCode}';
         // 失败则放回队列，下次重试
@@ -224,6 +323,42 @@ class NasSync with ChangeNotifier {
       Log.error('NAS Sync', 'flush failed: $e');
     }
     notifyListeners();
+    return sent;
+  }
+
+  /// 处理服务端拒绝操作的警告。
+  ///
+  /// 目前只有一种需要动手的：`favorite resurrect blocked`。
+  /// 含义是"这条收藏你在别的设备上已经删了，你现在推的是旧消息"。
+  /// 服务端拒绝写入是对的，但**本机还留着这条收藏**——它是从本地
+  /// 队列发出去的，用户界面上看得见。不在这里删掉，这台设备就会
+  /// 一直显示一个别的设备都看不到的幽灵收藏，而且下次全量同步又会
+  /// 把它推上去（再次被拒），永远自愈不了。
+  void _applyWarnings(dynamic raw) {
+    for (final target in parseResurrectWarnings(raw)) {
+      try {
+        if (!LocalFavoritesManager().existsFolder(target.folder)) continue;
+        // 不能直接用 ComicType(source.hashCode) 删：收藏行里的 type 可能是
+        // 服务端下发的 sourceType，未必等于 hashCode。按 id 找出真实的行再删，
+        // 否则 type 对不上就删不掉，幽灵收藏依然留着。
+        final matches = LocalFavoritesManager()
+            .getFolderComics(target.folder)
+            .where((c) => c.id == target.comicId)
+            .toList();
+        for (final item in matches) {
+          LocalFavoritesManager()
+              .deleteComicWithId(target.folder, target.comicId, item.type);
+        }
+        if (matches.isEmpty) continue;
+        Log.info(
+          'NAS Sync',
+          'removed resurrected favorite '
+          '${target.folder}/${target.comicId} (deleted elsewhere)',
+        );
+      } catch (e) {
+        Log.error('NAS Sync', 'remove resurrected favorite failed: $e');
+      }
+    }
   }
 
   /// 合并同一对象上的重复操作，只保留最后一条。
@@ -261,18 +396,39 @@ class NasSync with ChangeNotifier {
     return null;
   }
 
-  /// 全量同步：推送本地待发操作 + 拉取服务端变更。
-  Future<void> syncNow({bool full = false}) async {
-    if (!isEnabled || _isSyncing) return;
+  /// 同步：推送本地待发操作 + 拉取服务端变更。
+  ///
+  /// [onRemoteChanges] 在**首次发现云端有新数据、但还没应用完**时回调一次。
+  /// 调用方据此先弹一条"同步中"提示，再在返回后换成最终文案。
+  Future<NasSyncResult> syncNow({
+    bool full = false,
+    void Function()? onRemoteChanges,
+  }) async {
+    if (!isEnabled) return const NasSyncResult(NasSyncOutcome.disabled);
+    if (_isSyncing) return const NasSyncResult(NasSyncOutcome.busy);
     final client = NasClient.instance;
-    if (!await client.probe()) return;
+    if (!await client.probe()) {
+      return const NasSyncResult(NasSyncOutcome.failed, error: 'unreachable');
+    }
 
     _isSyncing = true;
     _lastError = null;
     notifyListeners();
 
+    // 只播报一次：增量会分多轮拉取，快照路径也可能重复触发。
+    var notified = false;
+    void notifyRemoteChanges() {
+      if (notified) return;
+      notified = true;
+      onRemoteChanges?.call();
+    }
+
+    var pulled = 0;
+    var pushed = 0;
+    var failed = false;
+
     try {
-      await flush();
+      pushed = await flush();
 
       if (full) {
         // 首次连接 / 游标丢失时的顺序**至关重要**：先拉后推。
@@ -287,19 +443,36 @@ class NasSync with ChangeNotifier {
         //    （典型场景：手机第一次连 NAS，服务端是空的）。
         //
         // 两步都是幂等的：收藏是集合语义、历史是 LWW、设置是覆盖。
-        await _pullSnapshot();
-        await _bootstrapPush();
+        pulled += await _pullSnapshot(onRemoteChanges: notifyRemoteChanges);
+        pushed += await _bootstrapPush();
       } else {
-        await _pullIncremental();
+        pulled += await _pullIncremental(onRemoteChanges: notifyRemoteChanges);
       }
       _lastSyncAt = DateTime.now();
     } catch (e) {
+      failed = true;
       _lastError = e.toString();
       Log.error('NAS Sync', 'sync failed: $e');
     } finally {
       _isSyncing = false;
       notifyListeners();
     }
+
+    if (failed) {
+      return NasSyncResult(
+        NasSyncOutcome.failed,
+        pulled: pulled,
+        pushed: pushed,
+        error: _lastError,
+      );
+    }
+    // 只有"真的从云端拉到了东西"才算有更新。
+    // 单纯把本地改动推上去（pushed > 0）不该说"云端数据有更新"。
+    return NasSyncResult(
+      pulled > 0 ? NasSyncOutcome.updated : NasSyncOutcome.upToDate,
+      pulled: pulled,
+      pushed: pushed,
+    );
   }
 
   /// 首次连接时把本地既有数据全量上推到服务端。
@@ -310,11 +483,13 @@ class NasSync with ChangeNotifier {
   ///
   /// 分批推送（每批 200 条）避免单个请求过大；服务端侧对重复 op 幂等，
   /// 因此重复执行安全。
-  Future<void> _bootstrapPush() async {
+  /// 返回成功推送的操作数。
+  Future<int> _bootstrapPush() async {
     final client = NasClient.instance;
     var dio = _dio(client);
-    if (dio == null) return;
+    if (dio == null) return 0;
 
+    var sent = 0;
     final ops = <Map<String, dynamic>>[];
 
     // ---- 收藏 ----
@@ -413,7 +588,7 @@ class NasSync with ChangeNotifier {
       Log.error('NAS Sync', 'bootstrap: read settings failed: $e');
     }
 
-    if (ops.isEmpty) return;
+    if (ops.isEmpty) return 0;
     Log.info('NAS Sync', 'bootstrap: pushing ${ops.length} existing records');
 
     const batchSize = 200;
@@ -429,22 +604,27 @@ class NasSync with ChangeNotifier {
         if (res.statusCode == 200 && res.data is Map) {
           var cursor = (res.data['cursor'] as num?)?.toInt();
           if (cursor != null) await client.updateCursor(cursor);
+          sent += batch.length;
         } else {
           Log.error('NAS Sync', 'bootstrap push failed: ${res.statusCode}');
         }
       } catch (e) {
         Log.error('NAS Sync', 'bootstrap push error: $e');
-        return;
+        return sent;
       }
     }
+    return sent;
   }
 
   /// 增量拉取：从记录的游标开始，拿其他设备的操作。
-  Future<void> _pullIncremental() async {
+  ///
+  /// 返回应用到的操作条数。
+  Future<int> _pullIncremental({void Function()? onRemoteChanges}) async {
     final client = NasClient.instance;
     var dio = _dio(client);
-    if (dio == null) return;
+    if (dio == null) return 0;
 
+    var applied = 0;
     var cursor = client.config.cursor;
     for (var round = 0; round < 20; round++) {
       var res = await dio.get('/api/v1/sync/pull', queryParameters: {
@@ -452,12 +632,11 @@ class NasSync with ChangeNotifier {
         'clientId': client.config.clientId,
         'limit': 500,
       });
-      if (res.statusCode != 200 || res.data is! Map) return;
+      if (res.statusCode != 200 || res.data is! Map) return applied;
       var data = Map<String, dynamic>.from(res.data);
 
       if (data['resyncRequired'] == true) {
-        await _pullSnapshot();
-        return;
+        return applied + await _pullSnapshot(onRemoteChanges: onRemoteChanges);
       }
 
       var ops = (data['ops'] as List?) ?? [];
@@ -465,13 +644,22 @@ class NasSync with ChangeNotifier {
         cursor = (data['cursor'] as num?)?.toInt() ?? cursor;
         break;
       }
+      // 先播报、再应用：这样"同步中"提示出现在数据落地之前，
+      // 用户看到的是"正在同步"，而不是同步完了才说要同步。
+      //
+      // 注意只在**确实有新操作**时播报，而不是"本地状态变了"：
+      // 只要服务端游标之后还有 op，就说明云端确实产生了新数据。
+      onRemoteChanges?.call();
       for (var op in ops) {
-        _applyRemoteOp(Map<String, dynamic>.from(op as Map));
+        if (_applyRemoteOp(Map<String, dynamic>.from(op as Map))) {
+          applied++;
+        }
       }
       cursor = (data['cursor'] as num?)?.toInt() ?? cursor;
       await client.updateCursor(cursor);
       if (data['hasMore'] != true) break;
     }
+    return applied;
   }
 
   /// 拉取完整快照（首次接入或游标过期时）。
@@ -479,22 +667,32 @@ class NasSync with ChangeNotifier {
   /// 这是「新设备装上就能看到收藏」的唯一入口，因此每一步都要能自证：
   /// 失败不再是静默的（历史 bug：连接显示成功、收藏一条都没有，
   /// 界面上完全看不出是哪一步断了）。
-  Future<void> _pullSnapshot() async {
+  ///
+  /// 返回应用到本地的条目数。
+  Future<int> _pullSnapshot({void Function()? onRemoteChanges}) async {
     final client = NasClient.instance;
     var dio = _dio(client);
-    if (dio == null) return;
+    if (dio == null) return 0;
 
     var res = await dio.get('/api/v1/sync/snapshot');
     if (res.statusCode != 200 || res.data is! Map) {
       _lastError = 'snapshot failed: HTTP ${res.statusCode}';
       Log.error('NAS Sync', _lastError!);
-      return;
+      return 0;
     }
     var snap = Map<String, dynamic>.from(res.data);
 
     var applied = 0;
     var failed = 0;
     _firstApplyError = null;
+
+    // 快照里有内容就先播报"同步中"：全量路径没有"逐条发现"的过程，
+    // 只能在动手应用之前判断。
+    final hasRemoteData =
+        (snap['favorites'] is Map && (snap['favorites'] as Map).isNotEmpty) ||
+            (snap['histories'] is List &&
+                (snap['histories'] as List).isNotEmpty);
+    if (hasRemoteData) onRemoteChanges?.call();
 
     // 收藏：按文件夹同步
     var favs = snap['favorites'];
@@ -504,14 +702,13 @@ class NasSync with ChangeNotifier {
         final folderName = folder.toString();
         for (var it in items) {
           if (it is! Map) continue;
-          final ok = _applyRemoteFavorite(
-            folderName,
-            Map<String, dynamic>.from(it),
-          );
-          if (ok) {
-            applied++;
-          } else {
+          final payload = Map<String, dynamic>.from(it);
+          final existed = _isFavoritePresent(folderName, payload);
+          final ok = _applyRemoteFavorite(folderName, payload);
+          if (!ok) {
             failed++;
+          } else if (!existed) {
+            applied++;
           }
         }
       });
@@ -527,8 +724,9 @@ class NasSync with ChangeNotifier {
       for (final h in histories) {
         if (h is! Map) continue;
         try {
-          _applyRemoteHistory(Map<String, dynamic>.from(h));
-          histApplied++;
+          if (_applyRemoteHistory(Map<String, dynamic>.from(h))) {
+            histApplied++;
+          }
         } catch (e) {
           histFailed++;
         }
@@ -554,6 +752,11 @@ class NasSync with ChangeNotifier {
     // 必须 await：full 同步是"先拉后推"，若设置还没落地就开始推，
     // 推上去的会是本机的出厂默认值，把别的设备的配置覆盖掉。
     await _applyRemoteSettings(snap['settings']);
+
+    // 只把"真正落地到本机"的条目算作更新：
+    // 全量快照每次都包含全部收藏，用条目数判断会导致每次启动都说
+    // "云端有更新"——那不是提示，是噪音。
+    return applied + histApplied;
   }
 
   /// 应用快照里的设置项。
@@ -603,37 +806,41 @@ class NasSync with ChangeNotifier {
   ///
   /// 关键约束：只做"幂等"变更，避免与监听器形成回环
   /// （应用时不应再次触发上传）。
-  void _applyRemoteOp(Map<String, dynamic> op) {
+  ///
+  /// 返回**本地状态是否真的被改变**。重复投递的同一条 op（游标落后时
+  /// 会重放）不应算作"云端有更新"，否则每次启动都会误报。
+  bool _applyRemoteOp(Map<String, dynamic> op) {
     var type = op['type']?.toString() ?? '';
     var payload = op['payload'];
-    if (payload is! Map) return;
+    if (payload is! Map) return false;
     var p = Map<String, dynamic>.from(payload);
 
     switch (type) {
       case 'fav.add':
-        _applyRemoteFavorite(p['folder']?.toString() ?? 'Favorites', p);
-        break;
+        final folder = p['folder']?.toString() ?? 'Favorites';
+        final existed = _isFavoritePresent(folder, p);
+        final ok = _applyRemoteFavorite(folder, p);
+        return ok && !existed;
       case 'fav.remove':
         _removeLocalFavorite(
           p['folder']?.toString() ?? '',
           p['source']?.toString() ?? '',
           p['comicId']?.toString() ?? '',
         );
-        break;
+        return true;
       case 'fav.move':
         _removeLocalFavorite(
           p['fromFolder']?.toString() ?? '',
           p['source']?.toString() ?? '',
           p['comicId']?.toString() ?? '',
         );
-        _applyRemoteFavorite(p['toFolder']?.toString() ?? 'Favorites', p);
-        break;
+        return _applyRemoteFavorite(p['toFolder']?.toString() ?? 'Favorites', p);
       case 'history.update':
-        _applyRemoteHistory(p);
-        break;
+        return _applyRemoteHistory(p);
       // source.data / setting.update 在多数场景下只对服务端有意义
       // （服务端需要它来跑下载），本机可忽略，避免覆盖当前登录态。
     }
+    return false;
   }
 
   /// 应用一条远端收藏。返回是否成功写入本地。
@@ -729,10 +936,14 @@ class NasSync with ChangeNotifier {
     }
   }
 
-  void _applyRemoteHistory(Map<String, dynamic> p) {
+  /// 应用一条远端阅读进度。
+  ///
+  /// 返回**是否真的写入了本地**。快照每次都带全量历史，只有"确实写入"
+  /// 才算云端有更新，否则每次启动都会误报"检测到云端数据有更新"。
+  bool _applyRemoteHistory(Map<String, dynamic> p) {
     try {
       var sourceKey = (p['source'] ?? p['sourceKey'])?.toString() ?? '';
-      if (sourceKey.isEmpty) return;
+      if (sourceKey.isEmpty) return false;
       // 同 _applyRemoteFavorite：不要因为源未安装就丢弃阅读进度。
       final typeHint = (p['sourceType'] as num?)?.toInt();
       var type = typeHint != null && typeHint != 0
@@ -740,7 +951,7 @@ class NasSync with ChangeNotifier {
           : ComicType(sourceKey.hashCode);
       // 字段名兼容：快照用 `id`，增量 payload 用 `comicId`。
       var comicId = (p['comicId'] ?? p['id'])?.toString() ?? '';
-      if (comicId.isEmpty) return;
+      if (comicId.isEmpty) return false;
       var existing = HistoryManager().find(comicId, type);
       var remoteTime = _timeOf(p);
       // LWW：远端更新时间更旧就不覆盖本地。
@@ -751,7 +962,7 @@ class NasSync with ChangeNotifier {
       if (existing != null &&
           remoteTime > 0 &&
           existing.time.millisecondsSinceEpoch >= remoteTime) {
-        return;
+        return false;
       }
       // History.fromMap 不解析 group，因此单独构造后赋值
       var history = History.fromMap({
@@ -772,8 +983,33 @@ class NasSync with ChangeNotifier {
         history.group = group;
       }
       HistoryManager().addHistory(history);
+      return true;
     } catch (e) {
       Log.error('NAS Sync', 'apply remote history failed: $e');
+      return false;
+    }
+  }
+
+  /// 判断一条远端收藏是否**已经存在**于本地对应文件夹。
+  ///
+  /// 快照是全量的：每条 fav.add 都会"成功"，用它来判断"云端有更新"
+  /// 会在每次启动时都成立。所以先看有没有，再决定算不算新增。
+  bool _isFavoritePresent(String folder, Map<String, dynamic> p) {
+    try {
+      var comicId = (p['comicId'] ?? p['id'])?.toString() ?? '';
+      if (comicId.isEmpty) return false;
+      if (!LocalFavoritesManager().existsFolder(folder)) return false;
+      final sourceKey = (p['source'] ?? p['sourceKey'])?.toString() ?? '';
+      final typeHint = (p['sourceType'] as num?)?.toInt() ??
+          (p['sourceTypeHint'] as num?)?.toInt();
+      final type = typeHint != null && typeHint != 0
+          ? ComicType(typeHint)
+          : ComicType(sourceKey.hashCode);
+      return LocalFavoritesManager()
+          .getFolderComics(folder)
+          .any((c) => c.id == comicId && c.type == type);
+    } catch (_) {
+      return false;
     }
   }
 

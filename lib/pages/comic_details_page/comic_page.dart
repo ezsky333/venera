@@ -162,6 +162,10 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
     unawaited(cache.load());
   }
 
+  /// mixin 侧的公开入口（云朵按钮与存储面板用）。
+  @override
+  void ensureNasCache() => _ensureNasCache();
+
   void _onNasCacheChanged() {
     if (mounted) setState(() {});
   }
@@ -391,14 +395,30 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
         child: Text(comic.title),
       ),
       actions: [
-        // NAS 资源管理入口：只在启用且在线时出现。
-        // 放在 AppBar 而不是菜单里，是因为它是高频操作
-        // （"这本我已经下过了，删掉腾空间"）。
-        if (nasCache?.isAvailable == true)
+        // NAS 资源管理入口。
+        //
+        // 显示条件：只要 NAS 已配置就出现，不再要求"已探测到在线"
+        // 或"已有缓存章节"。原因：
+        //   - buildTitle 在 buildChapters 之前执行，首帧时 nasCache
+        //     还没建好（_ensureNasCache 在 buildChapters 里调用），
+        //     用 isAvailable 判断会让按钮在首帧消失、之后再出现；
+        //   - 用户明确诉求："有下载任务或已缓存内容时云朵均出现"，
+        //     NAS 未配置时才隐藏。
+        // 点击后 showNasManage 内部会处理离线/未初始化的情况。
+        if (NasClient.instance.isEnabled)
           IconButton(
             tooltip: "NAS Storage".tl,
-            onPressed: showNasManage,
-            icon: const Icon(Icons.cloud_outlined),
+            onPressed: () {
+              // 首帧可能还没建立 cache，点的时候补一次并等待
+              _ensureNasCache();
+              showNasManage();
+            },
+            icon: Icon(
+              // 有缓存时用实心云，纯提示"这里能管 NAS"
+              (nasCache?.cachedChapters.isNotEmpty ?? false)
+                  ? Icons.cloud
+                  : Icons.cloud_outlined,
+            ),
           ),
         IconButton(
           onPressed: showMoreActions,

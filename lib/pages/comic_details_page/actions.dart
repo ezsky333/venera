@@ -12,6 +12,12 @@ abstract mixin class _ComicPageActions {
   /// NAS 章节缓存状态（由 _ComicPageState 提供；未启用 NAS 时为 null）。
   NasChapterCache? get nasCache;
 
+  /// 由 _ComicPageState 实现：确保 nasCache 已创建并开始加载。
+  ///
+  /// 云朵按钮在 buildTitle（早于 buildChapters）就要用到缓存状态，
+  /// 而 cache 的创建原本只在 buildChapters 里发生，因此需要这个钩子。
+  void ensureNasCache();
+
   bool isLiking = false;
 
   bool isLiked = false;
@@ -474,19 +480,37 @@ abstract mixin class _ComicPageActions {
   /// 用户诉求原话是"详情页添加 NAS 资源管理的按钮，可以删除 NAS 资源"。
   /// 做成独立面板而不是塞进长按菜单：管理是"看清单 + 批量删"的场景，
   /// 需要一个能一次看到全部缓存章节的地方。
-  void showNasManage() {
-    final cache = nasCache;
-    if (cache == null || !cache.isAvailable) {
+  ///
+  /// 时序处理：用户可能在首帧（nasCache 尚未建好）就点云朵按钮，
+  /// 这里主动建一次并等待探测完成，而不是直接报"不可达"。
+  Future<void> showNasManage() async {
+    var cache = nasCache;
+    if (cache == null) {
+      ensureNasCache();
+      cache = nasCache;
+    }
+    if (cache == null) {
+      App.rootContext.showMessage(
+        message: "NAS is not configured. Set it up in Settings.".tl,
+      );
+      return;
+    }
+    // 首次打开时可能还在探测：等一次 load 结果（内部有 memo/超时兜底）
+    if (!cache.isAvailable && !cache.isLoading) {
+      await cache.load();
+    }
+    if (!cache.isAvailable) {
       App.rootContext.showMessage(
         message: "NAS is unreachable. Check the connection.".tl,
       );
       return;
     }
+    if (!App.rootContext.mounted) return;
     showModalBottomSheet(
       context: App.rootContext,
       isScrollControlled: true,
       builder: (_) => _NasStoragePanel(
-        cache: cache,
+        cache: cache!,
         comicTitle: comic.title,
         comicId: comic.id,
         sourceKey: comic.sourceKey,

@@ -502,7 +502,13 @@
     "Re-download": "重新下载",
     "Offline NAS Mode": "离线 NAS 模式",
     "Covers, details and pages come from NAS": "封面、详情与图片优先从 NAS 取",
-    "This chapter is not cached on NAS.": "这一章没有缓存在 NAS 上。"
+    "This chapter is not cached on NAS.": "这一章没有缓存在 NAS 上。",
+    "pages": "页",
+    "Live": "实时",
+    "Polling": "轮询",
+    "Current version is up to date": "当前已是最新版本",
+    "Cloud data updated, syncing": "检测到云端数据有更新，同步中",
+    "Sync completed": "同步完成"
   },
   "zh_TW": {
     "Home": "首頁",
@@ -1007,6 +1013,12 @@
     "Re-download": "重新下載",
     "Offline NAS Mode": "離線 NAS 模式",
     "Covers, details and pages come from NAS": "封面、詳情與圖片優先從 NAS 取",
-    "This chapter is not cached on NAS.": "這一章沒有快取在 NAS 上。"
+    "This chapter is not cached on NAS.": "這一章沒有快取在 NAS 上。",
+    "pages": "頁",
+    "Live": "即時",
+    "Polling": "輪詢",
+    "Current version is up to date": "目前已是最新版本",
+    "Cloud data updated, syncing": "偵測到雲端資料有更新，同步中",
+    "Sync completed": "同步完成"
   }
 }

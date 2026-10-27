@@ -115,7 +115,11 @@ class Appdata with Init {
 
   var implicitData = <String, dynamic>{};
 
-  void writeImplicitData() async {
+  /// 把 implicitData 写盘。
+  ///
+  /// 返回 Future 而不是 void：调用方（如 NAS 同步游标）必须能 await，
+  /// 否则"写完就退出"的路径（进程被系统杀掉）会丢数据。
+  Future<void> writeImplicitData() async {
     while (_isSavingData) {
       await Future.delayed(const Duration(milliseconds: 20));
     }
