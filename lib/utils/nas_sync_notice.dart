@@ -23,6 +23,13 @@ const minProgressVisible = Duration(milliseconds: 1200);
 Future<void> announceNasStartupSync() async {
   if (!NasClient.instance.isEnabled) return;
 
+  // 启动同步必须留痕。曾经这里完全没有日志，于是"新设备连了 NAS
+  // 但历史一条都没同步"只能靠猜——无法区分"没跑"、"probe 失败"
+  // 还是"拉到了 0 条"。
+  Log.info('NAS Sync', 'startup sync begin '
+      '(baseUrl=${NasClient.instance.config.baseUrl}, '
+      'cursor=${NasClient.instance.config.cursor})');
+
   // 提示挂在 OverlayWidget 上，它要等第一帧之后才存在。
   // 本地 NAS 响应很快，同步经常比首帧还早结束——不等的话提示会被吞掉。
   //
@@ -43,6 +50,8 @@ Future<void> announceNasStartupSync() async {
 
   final result = await NasSync()
       .start(onRemoteChanges: canToast ? showProgress : null);
+
+  Log.info('NAS Sync', 'startup sync done: $result (canToast=$canToast)');
 
   if (!canToast) return;
 

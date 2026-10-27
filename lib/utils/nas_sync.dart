@@ -170,6 +170,8 @@ class NasSync with ChangeNotifier {
   Future<NasSyncResult> start({void Function()? onRemoteChanges}) async {
     if (!isEnabled) return const NasSyncResult(NasSyncOutcome.disabled);
     final hasCursor = NasClient.instance.config.cursor > 0;
+    Log.info('NAS Sync', 'start: cursor=${NasClient.instance.config.cursor} '
+        '→ ${hasCursor ? "incremental" : "full"}');
     return syncNow(full: !hasCursor, onRemoteChanges: onRemoteChanges);
   }
 
@@ -424,7 +426,13 @@ class NasSync with ChangeNotifier {
     if (_isSyncing) return const NasSyncResult(NasSyncOutcome.busy);
     final client = NasClient.instance;
     if (!await client.probe()) {
-      return const NasSyncResult(NasSyncOutcome.failed, error: 'unreachable');
+      // 必须留痕：probe 失败曾经完全静默，界面不提示、日志里也没有，
+      // 排查时只能看到"同步没跑"却找不到原因（用户实际遇到过：
+      // 新设备连了 NAS，但历史一条都没同步，日志全空）。
+      _lastError = 'unreachable: ${client.config.baseUrl}';
+      Log.error('NAS Sync', 'probe failed: ${client.config.baseUrl} '
+          '(status=${client.status})');
+      return NasSyncResult(NasSyncOutcome.failed, error: _lastError);
     }
 
     _isSyncing = true;
