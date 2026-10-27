@@ -165,6 +165,30 @@ func TestMaxFailedImages(t *testing.T) {
 	}
 }
 
+// chapterAwareRunner 让失败只作用于指定章节。
+//
+// fakeRunner.loadErr 对所有章节一视同仁，无法表达"第 1 章成功、
+// 第 2 章失败"这种真实场景（源站单章 500）。
+type chapterAwareRunner struct {
+	ok   *fakeRunner
+	fail error
+}
+
+func (c *chapterAwareRunner) LoadDetail(k, id string) (*model.ComicDetail, error) {
+	return c.ok.LoadDetail(k, id)
+}
+
+func (c *chapterAwareRunner) LoadEpisodes(k, comicID, ep string) ([]string, error) {
+	if ep == "2" {
+		return nil, c.fail
+	}
+	return c.ok.LoadEpisodes(k, comicID, ep)
+}
+
+func (c *chapterAwareRunner) ImageConfigFor(k, comicID, ep, img string) (*ImageConfig, error) {
+	return c.ok.ImageConfigFor(k, comicID, ep, img)
+}
+
 // TestJobContinuesAfterOneChapterFails 锁住"一章毁全本"的修复：
 //
 //	RunJob 现在会跳过失败章节继续往下，只有**全部**失败才判整本失败。
@@ -195,8 +219,20 @@ func TestJobContinuesAfterOneChapterFails(t *testing.T) {
 		},
 	}
 
-	// 让第 2 章拿不到页面，第 1 章正常
-	run.pages = nil
+	// 让第 2 章加载页面失败（源站报错），第 1 章正常。
+	//
+	// 注意不能再用 `run.pages = nil` 来表达这件事：现在"0 页"是
+	// 一个独立的、明确的失败语义（源站返回空章节），而"加载报错"
+	// 应该用 loadErr。这里按章节 ID 区分，因为 fakeRunner 的
+	// loadErr 是对所有章节生效的。
+	base := run
+	dl = NewDownloader(st, &chapterAwareRunner{
+		ok:   base,
+		fail: fmt.Errorf("load pages: Invalid status code: 500"),
+	}, 2)
+	dl.SetFetch(func(string, map[string]string) ([]byte, error) {
+		return pngBytes(), nil
+	})
 	if err := dl.RunJob(jobID, detail); err != nil {
 		// 两个章节中一个成功一个失败 → 应判成功（部分完成）
 		t.Fatalf("job should tolerate one failed chapter, got %v", err)

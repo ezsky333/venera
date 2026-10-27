@@ -635,12 +635,18 @@ func (s *Store) PutCachedChapter(c model.CachedChapter) error {
 	return err
 }
 
+// GetCachedChapter 返回某一章的缓存信息。
+//
+// 与 CachedChapterIDs 一致：`page_count > 0` 才算命中。
+// 否则 handleChapter 会对一个 0 页章节返回 cached:true + pages:[]，
+// 客户端于是显示空白页，而且因为"NAS 命中了"，连在线兜底都不会走。
 func (s *Store) GetCachedChapter(source, comicID, chapterID string) (*model.CachedChapter, error) {
 	var c model.CachedChapter
 	var created int64
 	err := s.db.QueryRow(
 		`SELECT source, comic_id, chapter_id, chapter_title, dir, page_count, cover, bytes, created_at
-		 FROM cached_chapters WHERE source = ? AND comic_id = ? AND chapter_id = ?`,
+		 FROM cached_chapters
+		 WHERE source = ? AND comic_id = ? AND chapter_id = ? AND page_count > 0`,
 		source, comicID, chapterID,
 	).Scan(&c.Source, &c.ComicID, &c.ChapterID, &c.ChapterTitle, &c.Dir, &c.PageCount, &c.Cover, &c.Bytes, &created)
 	if err == sql.ErrNoRows {
@@ -653,15 +659,18 @@ func (s *Store) GetCachedChapter(source, comicID, chapterID string) (*model.Cach
 	return &c, nil
 }
 
-// ListCachedByComic 返回某漫画已缓存的所有章节。
 // HasCachedChapters 判断某漫画在库里是否已有缓存章节。
 //
 // 用途：入队前过滤"已经下完的书"，避免客户端重复推送收藏时
 // 把已完成的漫画重新排队（见 jobs.Enqueue 的说明）。
+//
+// 同样只看 page_count > 0 的行：整本都是 0 页脏记录时应当
+// 允许重新入队，而不是永远判定"已缓存"。
 func (s *Store) HasCachedChapters(source, comicID string) (bool, error) {
 	var n int
 	err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM cached_chapters WHERE source = ? AND comic_id = ? LIMIT 1`,
+		`SELECT COUNT(*) FROM cached_chapters
+		 WHERE source = ? AND comic_id = ? AND page_count > 0 LIMIT 1`,
 		source, comicID).Scan(&n)
 	if err != nil {
 		return false, err
@@ -669,13 +678,20 @@ func (s *Store) HasCachedChapters(source, comicID string) (bool, error) {
 	return n > 0, nil
 }
 
-// CachedChapterIDs 返回某漫画已缓存的章节 ID 集合。
+// CachedChapterIDs 返回某本漫画已缓存的章节 ID 集合。
 //
 // 比 ListCachedByComic 轻：只取 chapter_id 一列，供"求源端章节表与
 // 已缓存集合的差集"使用（增量下载判断）。
+//
+// 注意 `page_count > 0` 这个过滤：历史版本会把"源站返回 0 页"的章节
+// 以 PageCount=0 写进表里，然后这本漫画就被判定为"已下全"，
+// 增量下载永远不会重试它（实测 picacg 6048f155 的第 71/72 话）。
+// 在读取侧排除这些行，既修好了存量脏数据，也保证下载侧
+// 之后即使再出现 0 页记录也不会被当成"已缓存"。
 func (s *Store) CachedChapterIDs(source, comicID string) (map[string]bool, error) {
 	rows, err := s.db.Query(
-		`SELECT chapter_id FROM cached_chapters WHERE source = ? AND comic_id = ?`,
+		`SELECT chapter_id FROM cached_chapters
+		 WHERE source = ? AND comic_id = ? AND page_count > 0`,
 		source, comicID)
 	if err != nil {
 		return nil, err
@@ -713,6 +729,28 @@ func (s *Store) ListCachedByComic(source, comicID string) ([]model.CachedChapter
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// DeleteZeroPageChapters 删除所有 page_count=0 的历史脏记录，返回删除条数。
+//
+// 这些行是旧版本"源站返回 0 页时记成功"留下的。读取侧已经过滤
+// （CachedChapterIDs / GetCachedChapter / HasCachedChapters 都带
+// page_count > 0），所以它们不会再影响行为；但留在表里会让
+// "库内章节数"这类统计虚高，也容易在排查时误导（看起来下过、其实没内容）。
+func (s *Store) DeleteZeroPageChapters() (int, error) {
+	res, err := s.db.Exec(`DELETE FROM cached_chapters WHERE page_count = 0`)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
+// CountZeroPageChapters 统计 0 页脏记录数量（用于面板展示与预览）。
+func (s *Store) CountZeroPageChapters() (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM cached_chapters WHERE page_count = 0`).Scan(&n)
+	return n, err
 }
 
 func (s *Store) DeleteCachedChapter(source, comicID, chapterID string) error {

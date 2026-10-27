@@ -233,12 +233,14 @@ func (d *Downloader) RunJob(jobID int64, detail *model.ComicDetail) error {
 		}
 	}
 
-	// 已缓存的章节跳过
+	// 已缓存的章节跳过。
+	//
+	// 必须用 CachedChapterIDs 而不是 ListCachedByComic：前者带
+	// `page_count > 0` 过滤，后者会把"源站返回 0 页"的历史脏记录
+	// 也当成已缓存，导致这些章永远不被重下（实测 picacg 第 71/72 话）。
 	cachedSet := map[string]bool{}
-	if list, err := d.store.ListCachedByComic(detail.Source, detail.ID); err == nil {
-		for _, c := range list {
-			cachedSet[c.ChapterID] = true
-		}
+	if ids, err := d.store.CachedChapterIDs(detail.Source, detail.ID); err == nil {
+		cachedSet = ids
 	}
 
 	total := len(targets)
@@ -455,13 +457,20 @@ func (d *Downloader) downloadChapterProgressBytes(detail *model.ComicDetail, ch 
 		return fmt.Errorf("load pages: %w", err)
 	}
 	if len(urls) == 0 {
-		// 空章节（例如外链章节）视为成功但记录 0 页，避免阻塞整本
-		return d.store.PutCachedChapter(model.CachedChapter{
-			Source: detail.Source, ComicID: detail.ID, ChapterID: ch.ID,
-			ChapterTitle: ch.Title,
-			Dir:          relativeTo(d.store.LibraryDir(), filepath.Join(baseDir, chapterDirName(ch))),
-			PageCount:    0, CreatedAt: time.Now(),
-		})
+		// 源站返回 0 页：**视为失败**，绝不写 cached_chapters。
+		//
+		// 这里原本是"记 0 页当成功，避免阻塞整本"。代价极其隐蔽：
+		//  1. CachedChapterIDs 认为该章已缓存 → 增量下载永远不会重试，
+		//     这本漫画从此"看起来下全了"，其实缺章；
+		//  2. handleChapter 返回 cached:true + pages:[] → 客户端打开是空白页，
+		//     而且因为 NAS 命中了，连在线兜底都不会走。
+		// 实测：picacg 6048f155 的第 71/72 话 pages=0 入库，
+		// 用户看到两页空白，且任务显示"已完成"。
+		//
+		// 0 页的真实原因通常是源站临时异常（登录态失效、接口 500、
+		// 章节被下架）。让它失败 → 任务标红、用户能看到、重试也有机会成功，
+		// 比"静默吞掉一整章"正确得多。
+		return fmt.Errorf("chapter %s: source returned 0 pages (chapter may be broken or delisted)", ch.ID)
 	}
 
 	dirName := chapterDirName(ch)

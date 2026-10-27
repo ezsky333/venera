@@ -226,12 +226,43 @@ async function loadOverview() {
 // 这个按钮让用户一条命令回源补齐，不必逐本重新下载。
 
 function metaBackfillControls() {
-  const box = el('div', {style:'display:inline-flex;gap:10px;align-items:center'});
+  const box = el('div', {style:'display:inline-flex;gap:10px;align-items:center;flex-wrap:wrap'});
   const badge = el('span', {class:'muted', id:'meta-badge'}, '');
   const btn = el('button', {class:'btn', onclick: () => runMetaBackfill(btn, badge)},
     '补全元数据信息');
   box.append(btn, badge);
+  // 清理 0 页脏记录：旧版本把"源站返回 0 页"当成功写进库，
+  // 导致那几章永远不会被重下、客户端读到空白页。
+  const zeroBtn = el('button', {class:'btn danger',
+    onclick: () => cleanupZeroPages(zeroBtn)}, '清理空章节记录');
+  box.append(zeroBtn);
   return box;
+}
+
+async function cleanupZeroPages(btn) {
+  btn.disabled = true;
+  const old = btn.textContent;
+  btn.textContent = '清理中…';
+  try {
+    const pre = await api('/api/v1/maintenance/zero-pages');
+    const n = pre.zeroPageChapters || 0;
+    if (n === 0) {
+      setStatus('没有空章节记录', 'ok');
+      return;
+    }
+    if (!confirm('发现 ' + n + ' 条 page_count=0 的章节记录（源站当次返回 0 页）。\n'
+        + '删除后这些章会被视为「未缓存」，下次增量下载会重新尝试。\n\n继续？')) {
+      setStatus('已取消');
+      return;
+    }
+    const r = await api('/api/v1/maintenance/zero-pages', {method:'POST'});
+    setStatus('已清理 ' + (r.deleted || 0) + ' 条空章节记录', 'ok');
+  } catch (e) {
+    setStatus('清理失败：' + e.message, 'err');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = old;
+  }
 }
 
 async function refreshMetaRemaining() {

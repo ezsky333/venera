@@ -8,6 +8,36 @@ import (
 	"github.com/venera-app/venera-nas/internal/jobs"
 )
 
+// handleCleanupZeroPages 清理 cached_chapters 里 page_count=0 的脏记录。
+//
+// 背景：旧版本在"源站返回 0 页"时仍写一条 PageCount=0 的记录并判定成功，
+// 结果是这本漫画被当成"已下全"，增量下载永远不会重试，客户端打开那章
+// 得到空白页（实测 picacg 6048f155 的第 35/71/72 话）。
+//
+// 修复后下载侧不再写这种行，读取侧也不再认它；这个端点是给
+// **存量数据** 用的：GET 预览数量，POST 真正删除。
+func (s *Server) handleCleanupZeroPages(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		n, err := s.st.CountZeroPageChapters()
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"zeroPageChapters": n, "dryRun": true})
+		return
+	}
+
+	n, err := s.st.DeleteZeroPageChapters()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	if s.log != nil {
+		s.log.Info(fmt.Sprintf("cleaned %d zero-page chapter records", n))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": n})
+}
+
 // handleMetadataBackfill 补全 comics 表里缺失的元数据（作者/上传者/简介/标签）。
 //
 // 为什么会有这个接口：comics 的 author/description 只在**下载任务**里写

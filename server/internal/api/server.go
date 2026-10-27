@@ -121,6 +121,9 @@ func (s *Server) Handler() http.Handler {
 	// GET 是"预览"（只返回还剩多少条待补），POST 才真正执行。
 	api.HandleFunc("GET /api/v1/metadata/backfill", s.handleMetadataBackfill)
 	api.HandleFunc("POST /api/v1/metadata/backfill", s.handleMetadataBackfill)
+	// 清理 page_count=0 的历史脏记录（旧版本把"源站 0 页"记成了成功）。
+	api.HandleFunc("GET /api/v1/maintenance/zero-pages", s.handleCleanupZeroPages)
+	api.HandleFunc("POST /api/v1/maintenance/zero-pages", s.handleCleanupZeroPages)
 	api.HandleFunc("GET /api/v1/jobs", s.handleJobs)
 	api.HandleFunc("GET /api/v1/jobs/events", s.handleJobsEvents)
 	api.HandleFunc("GET /api/v1/jobs/by-comic", s.handleComicJobs)
