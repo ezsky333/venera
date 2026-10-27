@@ -229,25 +229,107 @@ var ErrAlreadyCached = fmt.Errorf("already cached")
 
 // QueueFavorites 把收藏的漫画批量排队（跳过已缓存的）。
 func (w *Worker) QueueFavorites() (queued int, err error) {
-	favs, err := w.st.AllFavoriteComics()
+	plan, err := w.QueueFavoritesDetailed(false, "favorite-sync")
 	if err != nil {
 		return 0, err
 	}
+	return plan.Queued, nil
+}
+
+// QueuePlanItem 是预览里的一条。
+type QueuePlanItem struct {
+	Source  string `json:"source"`
+	ComicID string `json:"comicId"`
+	Title   string `json:"title"`
+}
+
+// QueuePlan 描述"补录未缓存收藏"这次会做什么。
+//
+// 分成规划（dryRun）和执行两步，是因为这两个数字差别极大：
+// 447 本收藏里可能只有 8 本真没下过。没有预览的话，用户点一下
+// 按钮不知道会往队列里塞 8 条还是 400 条，只能盲点。
+type QueuePlan struct {
+	// Candidates 是去重后、需要入队的漫画数（dryRun 时=将要入队的数量）。
+	Candidates int `json:"candidates"`
+	// Queued 是实际入队数（dryRun 时恒为 0）。
+	Queued int `json:"queued"`
+	// AlreadyQueued 已有 pending/running 任务，跳过。
+	AlreadyQueued int `json:"alreadyQueued"`
+	// AlreadyCached 库里已有缓存，跳过。
+	AlreadyCached int `json:"alreadyCached"`
+	// Failed 入队过程出错的数量（单条失败不中断整批）。
+	Failed int `json:"failed"`
+	// BySource 待入队/已入队的漫画按源分布。
+	BySource map[string]int `json:"bySource"`
+	// Items 前若干条明细，供面板展示"到底哪些书会被下"。
+	Items []QueuePlanItem `json:"items"`
+	// DryRun 标记这份结果是预览还是执行结果。
+	DryRun bool `json:"dryRun"`
+}
+
+// previewLimit 预览明细最多返回多少条（面板只看前几十条就够）。
+const previewLimit = 50
+
+// QueueFavoritesDetailed 规划并（可选）执行"补录未缓存的收藏"。
+//
+// dryRun=true 时只统计、不写库；false 时按同一套判定实际入队。
+// 两遍走的是同一段逻辑，避免"预览说 8 本、执行却入队 400 本"这种
+// 预览与执行不一致的坑。
+//
+// origin 会写进 jobs.origin，用于区分这批任务是"收藏自动同步"还是
+// "用户手动补录"——两者在面板上排查时含义完全不同。
+func (w *Worker) QueueFavoritesDetailed(dryRun bool, origin string) (*QueuePlan, error) {
+	if origin == "" {
+		origin = "favorite-backfill"
+	}
+	favs, err := w.st.AllFavoriteComics()
+	if err != nil {
+		return nil, err
+	}
+
+	plan := &QueuePlan{BySource: map[string]int{}, DryRun: dryRun}
+
+	// 收藏表里同一本漫画会出现在多个文件夹（实测 991 行 = 447 本），
+	// 不去重会重复判定、也会让统计口径看起来像"要下 991 本"。
+	seen := map[string]bool{}
 	for _, f := range favs {
+		key := f.Source + "\x00" + f.ID
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+
 		if exists, _ := w.st.PendingJobExists(f.Source, f.ID); exists {
+			plan.AlreadyQueued++
 			continue
 		}
 		// 已缓存的跳过：这个入口明确是"补下没下过的收藏"，
 		// 重复排队只会白跑 loadInfo/loadEp 再全部 skip。
 		if cached, _ := w.st.HasCachedChapters(f.Source, f.ID); cached {
+			plan.AlreadyCached++
+			continue
+		}
+
+		plan.Candidates++
+		plan.BySource[f.Source]++
+		if len(plan.Items) < previewLimit {
+			plan.Items = append(plan.Items, QueuePlanItem{
+				Source: f.Source, ComicID: f.ID, Title: f.Title,
+			})
+		}
+
+		if dryRun {
 			continue
 		}
 		if _, err := w.st.CreateJob(&model.Job{
-			Source: f.Source, ComicID: f.ID, Title: f.Title, Origin: "favorite-sync",
+			Source: f.Source, ComicID: f.ID, Title: f.Title,
+			Origin: origin,
 		}); err != nil {
-			return queued, err
+			// 单条失败不中断整批：一本坏数据不该让剩下几百本都排不上
+			plan.Failed++
+			continue
 		}
-		queued++
+		plan.Queued++
 	}
-	return queued, nil
+	return plan, nil
 }

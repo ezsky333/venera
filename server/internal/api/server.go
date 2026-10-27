@@ -25,16 +25,16 @@ import (
 
 // Server 聚合所有 HTTP 依赖。
 type Server struct {
-	cfg      Config
-	st       *store.Store
-	sync     *syncer.Syncer
-	src      *source.Manager
-	worker   *jobs.Worker
-	dl       *jobs.Downloader
+	cfg    Config
+	st     *store.Store
+	sync   *syncer.Syncer
+	src    *source.Manager
+	worker *jobs.Worker
+	dl     *jobs.Downloader
 	// hub 是实时进度中心（可为 nil：退化为只读数据库）。
-	hub      *jobs.Hub
-	log      *slog.Logger
-	started  time.Time
+	hub     *jobs.Hub
+	log     *slog.Logger
+	started time.Time
 }
 
 // Config 是 API 层需要的配置子集。
@@ -110,6 +110,11 @@ func (s *Server) Handler() http.Handler {
 
 	api.HandleFunc("POST /api/v1/download", s.handleDownload)
 	api.HandleFunc("POST /api/v1/download/favorites", s.handleDownloadFavorites)
+	// 同一个 handler 支持 GET 是给"补录预览"用的：dryRun 是只读操作，
+	// 用 GET 语义更准，也方便直接粘到浏览器地址栏看结果。
+	api.HandleFunc("GET /api/v1/download/favorites", s.handleDownloadFavorites)
+	api.HandleFunc("POST /api/v1/jobs/queue-favorites", s.handleDownloadFavorites)
+	api.HandleFunc("GET /api/v1/jobs/queue-favorites", s.handleDownloadFavorites)
 	// 补抓存量封面：只下载缺失的 cover，不动已有内页
 	api.HandleFunc("POST /api/v1/download/covers", s.handleRefetchCovers)
 	api.HandleFunc("GET /api/v1/jobs", s.handleJobs)
@@ -563,12 +568,12 @@ func (s *Server) handleChapter(w http.ResponseWriter, r *http.Request) {
 		cover = base + "/api/v1/media/" + urlPathEscape(ch.Cover) + tq
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"cached":  true,
-		"pages":   pages,
-		"cover":   cover,
-		"pages_":  ch.PageCount,
-		"bytes":   ch.Bytes,
-		"dir":     ch.Dir,
+		"cached": true,
+		"pages":  pages,
+		"cover":  cover,
+		"pages_": ch.PageCount,
+		"bytes":  ch.Bytes,
+		"dir":    ch.Dir,
 	})
 }
 
@@ -691,13 +696,36 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]any{"jobId": id, "status": "pending"})
 }
 
+// handleDownloadFavorites 补录"收藏了但没缓存"的漫画到下载队列。
+//
+// GET/POST /api/v1/jobs/queue-favorites?dryRun=1
+//
+// dryRun=1 只返回计划（会入队多少本、跳过多少、按源分布、前 50 条明细），
+// 不写库；不带则实际入队。面板先预览再确认，避免用户盲点一个按钮
+// 就把几百本塞进队列。
+//
+// 判定与收藏自动同步(QueueFavorites)共用同一段逻辑，区别只有 origin：
+// 这里写 favorite-backfill，自动同步写 favorite-sync。
 func (s *Server) handleDownloadFavorites(w http.ResponseWriter, r *http.Request) {
-	n, err := s.worker.QueueFavorites()
+	if s.worker == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"error": "worker not started",
+		})
+		return
+	}
+	dryRun := r.URL.Query().Get("dryRun")
+	isDry := dryRun == "1" || dryRun == "true"
+
+	plan, err := s.worker.QueueFavoritesDetailed(isDry, "favorite-backfill")
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"queued": n})
+	if !isDry {
+		s.log.Info("favorites backfill", "queued", plan.Queued,
+			"candidates", plan.Candidates, "failed", plan.Failed)
+	}
+	writeJSON(w, http.StatusOK, plan)
 }
 
 // handleRefetchCovers 补抓"已缓存但缺封面"的漫画的封面。

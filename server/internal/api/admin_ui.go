@@ -453,6 +453,7 @@ async function loadJobs(reset) {
         setStatus('重新排队 ' + r.affected + ' 个失败任务', 'ok');
         loadJobs(true);
       }}, '重试失败任务'),
+      el('button', {class:'btn', onclick: backfillFavorites}, '补录未缓存收藏'),
       el('button', {class:'btn danger', onclick: async () => {
         // 只清终态（完成/失败/已取消）。等待中和已暂停的是用户还要下载的
         // 东西，运行中的不能删（见行内删除按钮的说明）。
@@ -484,6 +485,46 @@ async function jobAction(id, action) {
     loadJobs();
   } catch (e) {
     setStatus('操作失败：' + e.message, 'err');
+  }
+}
+
+// 补录"收藏了但没缓存"的漫画。
+//
+// 两步：先 dryRun 拿计划（会入队多少本、跳过了多少、哪些书），把明细
+// 摊给用户看，确认后再真正入队。不能直接一键入队——收藏可能几百本，
+// 而真正没下过的也许只有个位数，盲点一下就往队列里塞几百条。
+async function backfillFavorites() {
+  let plan;
+  try {
+    plan = await api('/api/v1/jobs/queue-favorites?dryRun=1');
+  } catch (e) {
+    setStatus('预览失败：' + e.message, 'err');
+    return;
+  }
+  const bySource = Object.entries(plan.bySource || {})
+    .map(([k, v]) => k + ':' + v).join('  ');
+  if (!plan.candidates) {
+    setStatus('没有需要补录的漫画（收藏里都已缓存或已在队列中）', 'ok');
+    return;
+  }
+  const preview = (plan.items || []).slice(0, 15)
+    .map((it, i) => (i + 1) + '. [' + it.source + '] ' + (it.title || it.comicId))
+    .join('\n');
+  const more = plan.candidates > 15
+    ? '\n… 还有 ' + (plan.candidates - 15) + ' 本' : '';
+  const msg = '将补录 ' + plan.candidates + ' 本漫画到下载队列\n\n'
+    + '按源: ' + bySource + '\n'
+    + '已跳过: ' + plan.alreadyCached + ' 本已缓存, '
+    + plan.alreadyQueued + ' 本已在队列\n\n'
+    + '前几本:\n' + preview + more + '\n\n确定开始下载？';
+  if (!confirm(msg)) return;
+  try {
+    const r = await api('/api/v1/jobs/queue-favorites', {method:'POST', body:'{}'});
+    setStatus('已入队 ' + r.queued + ' 本'
+      + (r.failed ? '，失败 ' + r.failed + ' 本' : ''), 'ok');
+    loadJobs(true);
+  } catch (e) {
+    setStatus('补录失败：' + e.message, 'err');
   }
 }
 
