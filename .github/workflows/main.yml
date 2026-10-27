@@ -1,231 +1,501 @@
+# 全平台构建：Android / iOS / macOS / Windows / Linux(x64+arm64)
+#
+# 一个 workflow 出全部桌面与移动端产物，发布时统一附到 GitHub Release。
+#
+# ── 为什么上游 main.yml 在这份 fork 里跑不起来 ──────────────────────
+#   1. `flutter-version-file: pubspec.yaml` 读的是 environment.flutter。
+#      上游写的是当前 stable，本 fork 曾经写死 3.41.4，而 pubspec.lock
+#      要求 >=3.47.0 —— CI 装到满足不了依赖的 Flutter，dynamic_color
+#      的 build.gradle.kts 在旧 AGP/KGP 下直接编译失败。
+#   2. macOS/iOS 两步依赖 secrets.CERTIFICATE（macOS 签名证书）。
+#      fork 里没有这个 secret，`security import` 必然失败。
+#      因此 macOS 改成 ad-hoc 打包（未签名 DMG，可用但首次打开需
+#      右键 → 打开），iOS 保持 --no-codesign 出 ipa（仅自签/侧载用途）。
+#   3. Release 步骤用 secrets.ACTION_GITHUB_TOKEN 且 needs 全部 job，
+#      任何一个失败都不出 Release。现在改成按 job 独立产出 +
+#      单独的 Release job 用内置 GITHUB_TOKEN 汇总，
+#      单个平台失败不会让整条链路归零。
+#
+# ── 版本一致性 ──────────────────────────────────────────────────
+# 所有 job 都从 pubspec.yaml 的 environment.flutter 取版本，
+# 与 pubspec.lock 的 sdks.flutter 必须相容，改了要一起改。
 name: Build ALL
+
 run-name: Build ALL
+
 on:
   workflow_dispatch: {}
+  push:
+    tags: ["v*"]
   release:
     types: [published]
 
+concurrency:
+  group: build-all-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # 产物统一丢这里，Release job 直接收目录
+  DIST: dist
+
 jobs:
-  Build_MacOS:
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@v3
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: "stable"
-          flutter-version-file: pubspec.yaml
-          architecture: x64
-      - run: sudo xcode-select --switch /Applications/Xcode_16.4.app
-      - run: flutter pub get
-        # Step 1: Decode and install the certificate
-      - name: Decode and install certificate
-        env:
-          CERTIFICATE: ${{ secrets.CERTIFICATE }}
-          CERTIFICATE_PASSWORD: ${{ secrets.CERTIFICATE_PASSWORD }}
-        run: |
-          echo "$CERTIFICATE" | base64 --decode > signing_certificate.p12
-          security import signing_certificate.p12 -k ~/Library/Keychains/login.keychain -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-
-      - name: Check rust-toolchain.toml
-        run: rustup show
-
-      # Step 2: Build the Flutter macOS app
-      - name: Build Flutter macOS App
-        run: flutter build macos --release
-
-      # Step 3: Create the DMG file
-      - name: Create DMG
-        run: |
-          mkdir -p dist
-          mkdir -p dist/dmg_contents
-          cp -R build/macos/Build/Products/Release/venera.app dist/dmg_contents/
-          ln -s /Applications dist/dmg_contents/Applications
-          hdiutil create -volname "venera" -srcfolder dist/dmg_contents -ov -format UDZO "dist/venera.dmg"
-
-      - name: Add version to filename
-        run: |
-          APP_VERSION=$(grep "version:" pubspec.yaml | cut -d':' -f2 | tr -d ' ')
-          mkdir -p result
-          mv dist/venera.dmg result/venera-$APP_VERSION.dmg
-
-      # Step 4: Attach and upload artifacts (optional)
-      - name: Upload DMG
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos_build
-          path: result/
-  Build_IOS:
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@v3
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: "stable"
-          flutter-version-file: pubspec.yaml
-          architecture: x64
-      - run: sudo xcode-select --switch /Applications/Xcode_16.4.app
-      - run: flutter pub get
-      - run: flutter build ios --release --no-codesign
-      - run: |
-          mkdir -p /Users/runner/work/venera/venera/build/ios/iphoneos/Payload
-          mv /Users/runner/work/venera/venera/build/ios/iphoneos/Runner.app /Users/runner/work/venera/venera/build/ios/iphoneos/Payload
-          cd /Users/runner/work/venera/venera/build/ios/iphoneos/
-          zip -r venera-ios.ipa Payload
-      - name: Add version to filename
-        run: |
-          APP_VERSION=$(grep "version:" pubspec.yaml | cut -d':' -f2 | tr -d ' ')
-          mkdir -p result
-          mv build/ios/iphoneos/venera-ios.ipa result/venera-ios-$APP_VERSION.ipa
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ios_build
-          path: result/
-  Build_Android:
+  # ─────────────────────────── Android ───────────────────────────
+  android:
+    name: Android APK
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v3
-      - run: rm -rf /opt/hostedtoolcache
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: "stable"
-          flutter-version-file: pubspec.yaml
-          architecture: x64
-      - name: Decode and install certificate
+      - uses: actions/checkout@v4
+
+      # 清掉预置 toolcache：里面是镜像烘焙时固定的 Flutter，
+      # 会和 flutter-action 按 pubspec 装的版本打架。
+      - name: Clean hosted toolcache
+        run: rm -rf /opt/hostedtoolcache
+
+      # build.gradle 在配置阶段就 load(key.properties)，缺文件即失败，
+      # 所以签名材料必须先还原（早于任何 gradle 调用）。
+      - name: Restore signing material
         env:
           STORE_FILE: ${{ secrets.ANDROID_KEYSTORE }}
           PROPERTY_FILE: ${{ secrets.ANDROID_KEY_PROPERTIES }}
         run: |
-            echo "$STORE_FILE" | base64 --decode > android/keystore.jks
-            echo "$PROPERTY_FILE" > android/key.properties
-      - uses: actions/setup-java@v4
-        with:
-          distribution: 'oracle'
-          java-version: '17'
-      - name: Check rust-toolchain.toml
-        run: rustup show
-      - run: flutter pub get
-      - run: flutter build apk --release
-      - uses: actions/upload-artifact@v4
-        with:
-          name: apks
-          path: build/app/outputs/apk/release
-  Build_Windows:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v3
-      - name: install dependencies
-        run: | 
-          choco install yq -y
-          pip install httpx
-      - name: Install Inno Setup
-        run: choco install innosetup --no-progress
+          set -euo pipefail
+          if [ -z "${STORE_FILE:-}" ] || [ -z "${PROPERTY_FILE:-}" ]; then
+            echo "::error::ANDROID_KEYSTORE / ANDROID_KEY_PROPERTIES secrets are missing"
+            exit 1
+          fi
+          KS="$PWD/android/app/keystore.jks"
+          echo "$STORE_FILE" | base64 --decode > "$KS"
+          cp "$KS" android/keystore.jks
+          echo "$PROPERTY_FILE" > android/key.properties
+          cp android/key.properties android/app/key.properties
+          # storeFile 相对 app 模块解析，统一改绝对路径消除歧义
+          for f in android/key.properties android/app/key.properties; do
+            sed -i "s|^storeFile=.*|storeFile=$KS|" "$f"
+          done
+          PW="$(sed -n 's/^storePassword=//p' android/key.properties | tr -d '\r\n')"
+          ALIAS="$(sed -n 's/^keyAlias=//p' android/key.properties | tr -d '\r\n')"
+          keytool -list -keystore "$KS" -storepass "$PW" -alias "$ALIAS" | head -3
+
       - uses: subosito/flutter-action@v2
         with:
-          channel: "stable"
+          channel: stable
           flutter-version-file: pubspec.yaml
           architecture: x64
-      - name: build
+          cache: true
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # cargokit 需要 rust target；rust-toolchain.toml 里声明了 channel
+      # 与 targets，rustup show 会自动按文件安装
+      - name: Set up Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          rustup show
+
+      # build.gradle 写死 ndkVersion 28.0.13004108，runner 未必预装。
+      # 先查、再 sdkmanager 装、都不行就退到已装的最新版（本项目
+      # 并不直接用 NDK 编 C/C++，版本仅被插件读取）。
+      - name: Ensure NDK
+        run: |
+          set -e
+          SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          TARGET="28.0.13004108"
+          [ -d "$SDK/ndk/$TARGET" ] && { echo "NDK $TARGET present"; exit 0; }
+          ls -1 "$SDK/ndk" 2>/dev/null || echo "(none)"
+          SM="$(find "$SDK" -maxdepth 5 -name sdkmanager -type f 2>/dev/null | sort | tail -1)"
+          if [ -n "$SM" ]; then
+            yes | "$SM" --licenses >/dev/null 2>&1 || true
+            "$SM" --install "ndk;$TARGET" && exit 0
+          fi
+          LATEST="$(ls -1 "$SDK/ndk" 2>/dev/null | sort -V | tail -1)"
+          [ -z "$LATEST" ] && { echo "::error::no NDK available"; exit 1; }
+          echo "::warning::using NDK $LATEST instead of $TARGET"
+          sed -i "s/ndkVersion \"[^\"]*\"/ndkVersion \"$LATEST\"/" android/app/build.gradle
+
+      - run: flutter pub get
+
+      - name: Analyze (report only)
+        continue-on-error: true
+        run: flutter analyze lib
+
+      - name: Run tests
+        run: flutter test
+
+      # splits 已开（abi + universalApk）：产出 3 个 ABI 包 + 1 个通用包
+      - name: Build release APK
+        run: flutter build apk --release
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p "$DIST"
+          find build/app/outputs/apk/release -name "*.apk" -type f \
+            -exec cp -v {} "$DIST"/ \;
+          ls -lh "$DIST"
+
+      # cargokit 编 Rust 失败只往 stderr 打日志、不会让 Gradle 失败，
+      # 于是会出现 BUILD SUCCESSFUL 但 APK 里没有 librhttp.so，
+      # 装到手机上才报 "flutter_rust_bridge has not been initialized"。
+      # 对产物做硬校验，缺库直接失败。
+      - name: Verify librhttp.so packaged
+        run: |
+          set -euo pipefail
+          for apk in "$DIST"/*.apk; do
+            LIBS="$(unzip -l "$apk" | grep -o 'lib/[^ ]*/librhttp\.so' | sort -u || true)"
+            if [ -z "$LIBS" ]; then
+              echo "::error::librhttp.so missing from $apk"
+              exit 1
+            fi
+            echo "$apk ok: $LIBS"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: dist/*.apk
+          retention-days: 30
+          if-no-files-found: error
+
+  # ─────────────────────────── macOS ───────────────────────────
+  macos:
+    name: macOS DMG
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      # 不导入证书：fork 没有 secrets.CERTIFICATE。
+      # flutter build macos 默认会做 ad-hoc 签名（codesign -s -），
+      # 产出的 app 在本机与"右键打开"场景可直接用。
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version-file: pubspec.yaml
+          architecture: x64
+          cache: true
+
+      - name: Select Xcode
+        run: sudo xcode-select --switch /Applications/Xcode_16.4.app
+
+      - name: Set up Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          rustup show
+
+      - run: flutter pub get
+
+      - name: Build macOS app
+        run: flutter build macos --release
+
+      - name: Package DMG
+        run: |
+          set -euo pipefail
+          mkdir -p "$DIST/dmg_contents"
+          cp -R build/macos/Build/Products/Release/venera.app "$DIST/dmg_contents/"
+          ln -s /Applications "$DIST/dmg_contents/Applications"
+          VERSION="$(grep -m1 '^version:' pubspec.yaml | cut -d':' -f2 | tr -d ' ' | cut -d'+' -f1)"
+          hdiutil create -volname venera -srcfolder "$DIST/dmg_contents" \
+            -ov -format UDZO "$DIST/venera-$VERSION-macos.dmg"
+          rm -rf "$DIST/dmg_contents"
+          ls -lh "$DIST"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/*.dmg
+          retention-days: 30
+          if-no-files-found: error
+
+  # ─────────────────────────── iOS ───────────────────────────
+  ios:
+    name: iOS IPA (unsigned)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version-file: pubspec.yaml
+          architecture: x64
+          cache: true
+
+      - name: Select Xcode
+        run: sudo xcode-select --switch /Applications/Xcode_16.4.app
+
+      - name: Set up Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          rustup show
+
+      - run: flutter pub get
+
+      # 未签名 ipa：只能用于自签重签/侧载，不能直接上架。
+      # 保留这一步是因为"能拿到 ipa"本身对自用有价值。
+      - name: Build iOS (no codesign)
+        run: flutter build ios --release --no-codesign
+
+      - name: Package IPA
+        run: |
+          set -euo pipefail
+          cd build/ios/iphoneos
+          rm -rf Payload && mkdir -p Payload
+          cp -R Runner.app Payload/
+          VERSION="$(grep -m1 '^version:' ../../../pubspec.yaml | cut -d':' -f2 | tr -d ' ' | cut -d'+' -f1)"
+          mkdir -p ../../../"$DIST"
+          zip -qr ../../../"$DIST"/venera-"$VERSION"-ios-unsigned.ipa Payload
+          cd ../../..
+          ls -lh "$DIST"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios
+          path: dist/*.ipa
+          retention-days: 30
+          if-no-files-found: error
+
+  # ─────────────────────────── Windows ───────────────────────────
+  windows:
+    name: Windows Installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          choco install yq innosetup --no-progress -y
+          pip install httpx
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version-file: pubspec.yaml
+          architecture: x64
+          cache: true
+
+      - name: Set up Rust
+        shell: bash
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          rustup show
+
+      # windows/build.py 会 flutter build windows 再打 zip + 用
+      # Inno Setup 生成安装包，产物落在 build/windows/Venera-*
+      - name: Build
         run: |
           flutter pub get
           python windows/build.py
+
+      - name: Collect artifacts
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:DIST" | Out-Null
+          Copy-Item build/windows/Venera-* "$env:DIST" -Force
+          Get-ChildItem "$env:DIST" | Select-Object Name, Length
+
       - uses: actions/upload-artifact@v4
         with:
-          name: windows_build
-          path: build/windows/Venera-*
-  Build_Linux:
+          name: windows
+          path: dist/*
+          retention-days: 30
+          if-no-files-found: error
+
+  # ─────────────────────── Linux x64 (deb + arch) ───────────────────────
+  linux:
+    name: Linux x64 (deb/arch/AppImage)
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+
       - uses: subosito/flutter-action@v2
         with:
-          channel: 'stable'
+          channel: stable
           flutter-version-file: pubspec.yaml
           architecture: x64
-      - run: |
+          cache: true
+
+      - name: Install system deps
+        run: |
           sudo apt-get update -y
-          sudo apt-get install -y ninja-build libgtk-3-dev webkit2gtk-4.1
+          sudo apt-get install -y ninja-build libgtk-3-dev libwebkit2gtk-4.1-dev
           dart pub global activate -s git https://github.com/venera-app/flutter_to_debian.git
-      - run: python3 debian/build.py x64
-      - run: dart run flutter_to_arch
-      - run: |
-          sudo rm -rf build/linux/arch/app.tar.gz
-          sudo rm -rf build/linux/arch/pkg
-          sudo rm -rf build/linux/arch/src
-          sudo rm -rf build/linux/arch/PKGBUILD
+
+      - name: Set up Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          rustup show
+
+      - run: flutter pub get
+
+      - name: Build deb
+        run: python3 debian/build.py x64
+
+      # flutter_to_arch 出 Arch 包（PKGBUILD + zst）
+      - name: Build arch package
+        run: |
+          dart run flutter_to_arch || echo "::warning::flutter_to_arch failed, skipping arch pkg"
+
+      - name: Collect artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p "$DIST"
+          find build/linux -name "*.deb" -exec cp -v {} "$DIST"/ \; || true
+          find build/linux -name "*.zst" -exec cp -v {} "$DIST"/ \; || true
+          find build/linux -name "*.AppImage" -exec cp -v {} "$DIST"/ \; || true
+          ls -lh "$DIST" || true
+
       - uses: actions/upload-artifact@v4
         with:
-          name: deb_build
-          path: build/linux/x64/release/debian
-      - uses: actions/upload-artifact@v4
-        with:
-          name: arch_build
-          path: build/linux/arch/
-  Build_Linux_ARM64:
+          name: linux-x64
+          path: dist/*
+          retention-days: 30
+          if-no-files-found: warn
+
+  # ─────────────────────── Linux arm64 (deb) ───────────────────────
+  linux-arm64:
+    name: Linux arm64 (deb)
     runs-on: ubuntu-22.04-arm
     steps:
       - uses: actions/checkout@v4
+
       - uses: subosito/flutter-action@v2
         with:
-          channel: 'master'
+          # arm64 官方 stable 产物过去有缺口，上游用的是 master 通道
+          channel: master
           flutter-version-file: pubspec.yaml
-      - run: |
-          flutter pub get
-          sudo apt-get update -y
-          sudo apt-get install -y ninja-build libgtk-3-dev webkit2gtk-4.1
-          dart pub global activate -s git https://github.com/venera-app/flutter_to_debian.git
-      - name: "Patch font"
+          cache: true
+
+      - name: Install system deps
         run: |
-          dart run patch/font.dart
-      - run: python3 debian/build.py arm64
+          sudo apt-get update -y
+          sudo apt-get install -y ninja-build libgtk-3-dev libwebkit2gtk-4.1-dev
+          dart pub global activate -s git https://github.com/venera-app/flutter_to_debian.git
+
+      - name: Set up Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          rustup show
+
+      - run: flutter pub get
+
+      # 部分源/字体需在 arm64 上打补丁，上游也是这么做的
+      - name: Patch font
+        run: dart run patch/font.dart
+
+      - name: Build deb arm64
+        run: python3 debian/build.py arm64
+
+      - name: Collect artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p "$DIST"
+          # flutter_to_debian 在 arm64 上仍把产物写进 x64 目录（上游注释
+          # 里也标了这是插件的 bug，不影响使用）
+          find build/linux -name "*.deb" -exec cp -v {} "$DIST"/ \; || true
+          ls -lh "$DIST" || true
+
       - uses: actions/upload-artifact@v4
         with:
-          name: deb_arm64_build
-          path: build/linux/x64/release/debian # This is a bug related to flutter_to_debian, but it's not a big deal.
+          name: linux-arm64
+          path: dist/*
+          retention-days: 30
+          if-no-files-found: warn
 
-  Release:
+  # ─────────────────────────── Release ───────────────────────────
+  # 汇总所有平台产物，附到 Release。
+  #
+  # 与上游的关键差异：
+  #   - 用内置 secrets.GITHUB_TOKEN（不需要 ACTION_GITHUB_TOKEN）
+  #   - `if: always() && ...` + 逐个下载 artifact（ignore 缺失），
+  #     单个平台挂了不影响其余产物上架
+  #   - 额外把容器镜像地址写进 Release 正文（见下面 step）
+  release:
+    name: Attach to Release
     runs-on: ubuntu-22.04
-    needs: [Build_MacOS, Build_IOS, Build_Android, Build_Windows, Build_Linux, Build_Linux_ARM64]
-    if: github.event_name == 'release'  # 仅在 push 事件时执行
+    needs: [android, macos, ios, windows, linux, linux-arm64]
+    if: always() && (github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v'))
+    permissions:
+      contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
         with:
-          name: macos_build
           path: outputs
-      - uses: actions/download-artifact@v4
+          merge-multiple: true
+
+      - name: List collected files
+        run: |
+          echo "=== collected ==="
+          ls -lhR outputs || true
+
+      - name: Read version
+        id: v
+        run: |
+          VERSION="$(grep -m1 '^version:' pubspec.yaml | cut -d':' -f2 | tr -d ' ')"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "semver=${VERSION%%+*}" >> "$GITHUB_OUTPUT"
+
+      - name: Write release notes
+        run: |
+          set -euo pipefail
+          OWNER="${{ github.repository_owner }}"
+          cat > notes.md <<EOF
+          ## 安装包
+
+          | 平台 | 文件 |
+          |---|---|
+          | Android | \`venera-*-arm64-v8a.apk\` / \`venera-*-armeabi-v7a.apk\` / \`venera-*-x86_64.apk\` / \`venera-*-universal.apk\` |
+          | Windows | \`Venera-*-windows.zip\` / 安装包 \`.exe\` |
+          | macOS | \`venera-*-macos.dmg\`（未签名，首次打开需右键 → 打开） |
+          | iOS | \`venera-*-ios-unsigned.ipa\`（未签名，需自签重签后侧载） |
+          | Linux x64 | \`.deb\` / Arch \`.zst\` |
+          | Linux arm64 | \`.deb\` |
+
+          ## NAS 服务端（容器镜像）
+
+          \`\`\`
+          docker pull ghcr.io/${OWNER}/venera-nas:latest
+          \`\`\`
+
+          多架构：\`linux/amd64\`、\`linux/arm64\`。
+
+          \`\`\`bash
+          docker run -d --name venera-nas \\
+            -p 8080:8080 \\
+            -v /path/to/data:/data \\
+            -v /path/to/library:/library \\
+            -e VENERA_TOKEN=your-token \\
+            ghcr.io/${OWNER}/venera-nas:latest
+          \`\`\`
+
+          环境变量见仓库 \`server/README.md\`。
+          EOF
+          cat notes.md
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
         with:
-          name: ios_build
-          path: outputs
-      - uses: actions/download-artifact@v4
-        with:
-          name: apks
-          path: outputs
-      - uses: actions/download-artifact@v4
-        with:
-          name: windows_build
-          path: outputs
-      - uses: actions/download-artifact@v4
-        with:
-          name: deb_build
-          path: outputs
-      - uses: actions/download-artifact@v4
-        with:
-          name: arch_build
-          path: outputs
-      - uses: actions/download-artifact@v4
-        with:
-          name: deb_arm64_build
-          path: outputs
-      - uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref_name }}
+          name: ${{ steps.v.outputs.version }}
+          body_path: notes.md
+          # glob 不匹配时 softprops 会直接失败，这里逐类列出并用
+          # 单条 files 输入；缺失的类型不会中断（v2 对未匹配 glob 宽松）
           files: |
+            outputs/*.apk
             outputs/*.ipa
             outputs/*.dmg
-            outputs/*.apk
             outputs/*.zip
             outputs/*.exe
             outputs/*.deb
             outputs/*.zst
             outputs/*.AppImage
-        env:
-          GITHUB_TOKEN: ${{ secrets.ACTION_GITHUB_TOKEN }}
+          fail_on_unmatched_files: false
+          token: ${{ secrets.GITHUB_TOKEN }}

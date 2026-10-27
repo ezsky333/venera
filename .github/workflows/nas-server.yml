@@ -1,4 +1,10 @@
-﻿# 在推送 tag 或手动触发时构建多架构镜像
+# NAS 服务端容器镜像：构建多架构镜像并推送到 GHCR。
+#
+# 历史失败原因（已修）：
+#   #15 ERROR: process "/bin/sh -c go mod download" did not complete successfully
+#     go: go.mod requires go >= 1.26.1 (running go 1.24.13; GOTOOLCHAIN=local)
+#   Dockerfile 用的是 golang:1.24-alpine，低于 go.mod 声明的 1.26.1。
+#   现在固定 golang:1.26-alpine，与 go.mod 对齐。
 name: Build NAS Server Image
 
 on:
@@ -9,9 +15,12 @@ on:
       - "server/**"
       - ".github/workflows/nas-server.yml"
   workflow_dispatch:
+  release:
+    types: [published]
 
 env:
   REGISTRY: ghcr.io
+  # GHCR 镜像名必须全小写；github.repository_owner 可能含大写
   IMAGE_NAME: ${{ github.repository_owner }}/venera-nas
 
 jobs:
@@ -26,12 +35,16 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
+          # 以 go.mod 的 go 指令为准，避免这里又写死一个旧版本
           go-version-file: server/go.mod
           cache-dependency-path: server/go.sum
 
+      - name: Show Go version
+        run: go version
+
       - name: Run tests
         working-directory: server
-        run: go test ./... -v
+        run: go test ./... 
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -47,11 +60,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # 镜像名小写化：GHCR 对含大写的 tag 直接 400
+      - name: Normalize image name
+        id: img
+        run: |
+          echo "name=$(echo '${{ env.IMAGE_NAME }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ steps.img.outputs.name }}
           tags: |
             type=ref,event=branch
             type=semver,pattern={{version}}
@@ -59,6 +78,7 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: ./server
@@ -71,3 +91,55 @@ jobs:
             VERSION=${{ github.ref_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Image summary
+        run: |
+          {
+            echo "### NAS 镜像已推送"
+            echo ""
+            echo '```'
+            echo "ghcr.io/${{ steps.img.outputs.name }}:latest"
+            echo "digest: ${{ steps.build.outputs.digest }}"
+            echo '```'
+            echo ""
+            echo "平台：linux/amd64, linux/arm64"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # 把可用的镜像地址写到 Release 正文里，用户不用翻 workflow 日志
+      # 就能拿到 docker pull 命令。
+      - name: Append image info to release
+        if: github.event_name == 'release'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = context.payload.release.tag_name;
+            const image = `ghcr.io/${{ steps.img.outputs.name }}`;
+            const block = [
+              '',
+              '## NAS 服务端镜像',
+              '',
+              '```',
+              `docker pull ${image}:latest`,
+              `docker pull ${image}:${tag}`,
+              '```',
+              '',
+              '多架构：`linux/amd64`、`linux/arm64`。',
+              '',
+              '```bash',
+              'docker run -d --name venera-nas \\',
+              '  -p 8080:8080 \\',
+              '  -v /path/to/data:/data \\',
+              '  -v /path/to/library:/library \\',
+              '  -e VENERA_TOKEN=your-token \\',
+              `  ${image}:latest`,
+              '```',
+              '',
+            ].join('\n');
+            const { data: rel } = await github.rest.repos.getReleaseByTag({
+              owner: context.repo.owner, repo: context.repo.repo, tag,
+            });
+            await github.rest.repos.updateRelease({
+              owner: context.repo.owner, repo: context.repo.repo,
+              release_id: rel.id,
+              body: (rel.body || '') + block,
+            });

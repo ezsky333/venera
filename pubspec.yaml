@@ -5,8 +5,19 @@ publish_to: 'none'
 version: 1.6.3+163
 
 environment:
+  # Dart SDK 下限保持宽松（3.8），实际由下面的 flutter 约束决定。
   sdk: '>=3.8.0 <4.0.0'
-  flutter: 3.41.4
+  # Flutter 版本**必须**与 pubspec.lock 的 `sdks.flutter` 一致，
+  # 否则 CI 会装到一个满足不了依赖的 Flutter。
+  #
+  # 这里曾经写死 3.41.4，而 lock 里是 `flutter: ">=3.47.0"`：CI 按
+  # 3.41.4 装（subosito/flutter-action 的 flutter-version-file），
+  # 与本地 3.47.7 不一致，结果 dynamic_color 1.9.0 的
+  # `build.gradle.kts` 在 3.41.4 自带的 AGP/KGP 组合下编译失败：
+  #   Line 28: kotlin { compilerOptions { ... } }
+  #   Unresolved reference: compilerOptions / jvmTarget
+  # 本地能过、CI 过不去就是这个版本差。
+  flutter: 3.47.7
 
 dependencies:
   flutter:

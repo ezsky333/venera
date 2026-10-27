@@ -1,6 +1,11 @@
 # ---- build stage ----
-# 使用多阶段构建把二进制压到最小，适合 NAS 上长期运行。
-FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
+# 多阶段构建：把二进制压到最小，适合 NAS 上长期运行。
+#
+# 基础镜像的 Go 版本必须 >= go.mod 里声明的版本，否则 go mod download 直接失败：
+#   go: go.mod requires go >= 1.26.1 (running go 1.24.13; GOTOOLCHAIN=local)
+# 这里刻意不带 GOTOOLCHAIN=auto 来"自动下载工具链"——容器构建应完全
+# 由镜像版本决定，避免构建时再联网拉一套 Go，那样既慢又不可复现。
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
 
 WORKDIR /src
 
@@ -29,7 +34,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # 时区数据用于日志可读性。
 FROM alpine:3.20
 
-RUN apk add --no-cache ca-certificates tzdata && \
+RUN apk add --no-cache ca-certificates tzdata wget && \
     adduser -D -u 1000 venera
 
 COPY --from=builder /out/venera-nas /usr/local/bin/venera-nas
@@ -47,6 +52,8 @@ ENV VENERA_LISTEN=:8080 \
 
 EXPOSE 8080
 
+# 注意：这里用 127.0.0.1 探测，而 VENERA_LISTEN 是 :8080（全部网卡）。
+# 容器内自检走 loopback 不需要额外放开监听地址。
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD wget -qO- http://127.0.0.1:8080/healthz || exit 1
 

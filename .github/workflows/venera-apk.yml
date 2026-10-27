@@ -1,4 +1,12 @@
-# 构建改版 APK（含 NAS 客户端）。
+# 日常提交的快速反馈：只出 Android APK，验证 Rust 桥接与签名链路。
+#
+# 与 main.yml 的分工：
+#   - 这里：push 到 master 时跑，快（~5 分钟），只验 Android 能编过、
+#     librhttp.so 真的打进包里。
+#   - main.yml：打 tag / 手动 / release 时跑，出全平台产物并附到 Release。
+#
+# 因此这里**排除 tag**：否则每次打 tag 会同时触发两份 APK 构建，
+# 既浪费 runner 又可能让 Release 收到重复文件。
 #
 # 设计要点（都是踩坑后确定的）：
 #   1. 不要用 android-actions/setup-android@v3：它会执行
@@ -8,13 +16,12 @@
 #      且许可证已接受，Gradle 会自动补齐 ndkVersion 指定的 NDK。
 #   2. android/app/build.gradle 在配置阶段就 `load(key.properties)`，
 #      缺文件会在解析期直接失败，因此签名材料必须先还原。
-#   3. Flutter 版本由 pubspec.yaml 驱动（项目锁定 3.41.4），
-#      避免与本机/镜像的 Flutter 大版本差异引发 AGP DSL 变更问题。
+#   3. Flutter 版本由 pubspec.yaml 驱动，且必须与 pubspec.lock 的
+#      sdks.flutter 相容（见 pubspec.yaml 里的说明）。
 name: Build Venera APK (NAS)
 
 on:
   push:
-    tags: ["v*"]
     branches: [master, main]
     paths:
       - "lib/**"
