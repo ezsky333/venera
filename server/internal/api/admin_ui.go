@@ -380,6 +380,9 @@ async function loadJobs(reset) {
     const canResume = j.status === 'paused';
     const canCancel = j.status === 'pending' || j.status === 'paused';
     const canRetry = j.status === 'failed' || j.status === 'cancelled';
+    // 运行中的任务不能删：worker 靠 jobs 行里的 message 判断该不该停，
+    // 行被删掉后它就再也停不下来（会继续把整本下完）。先暂停再删。
+    const canDelete = j.status !== 'running';
     const p = Math.round((j.progress || 0) * 100);
     // data-job-id 让 applyLive() 能原地找到这一行做实时刷新：
     // 只改进度条/百分比/速度/页数/信息，不重建 DOM（aria2 式顺滑的关键）
@@ -406,7 +409,12 @@ async function loadJobs(reset) {
           onclick: () => jobAction(j.id, j.priority ? 'untop' : 'top')},
           j.priority ? '取消置顶' : '置顶') : null,
         canCancel ? el('button', {class:'btn danger', onclick: () => jobAction(j.id, 'cancel')}, '取消') : null,
-        canRetry ? el('button', {class:'btn', onclick: () => jobAction(j.id, 'retry')}, '重试') : null)
+        canRetry ? el('button', {class:'btn', onclick: () => jobAction(j.id, 'retry')}, '重试') : null,
+        canDelete ? el('button', {class:'btn danger', onclick: () => {
+          if (!confirm('删除任务 #' + j.id + '？\n\n只删除这条任务记录，'
+                       + '不会删除已下载的缓存文件。')) return;
+          jobAction(j.id, 'delete');
+        }}, '删除') : null)
     );
   });
 
@@ -445,6 +453,16 @@ async function loadJobs(reset) {
         setStatus('重新排队 ' + r.affected + ' 个失败任务', 'ok');
         loadJobs(true);
       }}, '重试失败任务'),
+      el('button', {class:'btn danger', onclick: async () => {
+        // 只清终态（完成/失败/已取消）。等待中和已暂停的是用户还要下载的
+        // 东西，运行中的不能删（见行内删除按钮的说明）。
+        if (!confirm('清理所有「完成 / 失败 / 已取消」的任务记录？\n\n'
+                     + '不会删除已下载的缓存文件；正在下载的任务会保留。')) return;
+        const r = await api('/api/v1/jobs/bulk', {method:'POST',
+          body:'{"action":"delete-finished"}'});
+        setStatus('已清理 ' + r.affected + ' 条任务记录', 'ok');
+        loadJobs(true);
+      }}, '清理已完成任务'),
       el('button', {class:'btn', onclick: () => loadJobs(true)}, '刷新')
     ),
     el('table', null,

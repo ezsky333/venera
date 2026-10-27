@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/venera-app/venera-nas/internal/jobs"
 	"github.com/venera-app/venera-nas/internal/model"
+	"github.com/venera-app/venera-nas/internal/store"
 )
 
 // 本文件实现下载任务的常规管理操作与实时事件推送。
@@ -21,7 +23,8 @@ import (
 //     SSE 用纯 http.Flusher 实现，不引入第三方库，与面板零依赖的取舍一致。
 
 // handleJobAction 处理单个任务的管理动作。
-//   POST /api/v1/jobs/{id}/pause | resume | top | untop | cancel | retry
+//
+//	POST /api/v1/jobs/{id}/pause | resume | top | untop | cancel | retry | delete
 func (s *Server) handleJobAction(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
@@ -62,6 +65,22 @@ func (s *Server) handleJobAction(w http.ResponseWriter, r *http.Request) {
 	case "retry":
 		ok, err = s.st.RetryJob(id)
 		msg = "requeued"
+	case "delete":
+		ok, err = s.st.DeleteJob(id)
+		if errors.Is(err, store.ErrJobRunning) {
+			// 运行中的任务不能删：worker 靠 jobs 行里的 message 判断
+			// 该不该停，行没了它就再也停不下来（会继续下完整本）。
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error": "任务正在下载，请先暂停再删除",
+			})
+			return
+		}
+		if err == nil && ok && s.hub != nil {
+			// 清掉内存里的实时状态，否则面板会继续显示这一行的进度
+			s.hub.Clear(id)
+			s.hub.BumpState()
+		}
+		msg = "deleted"
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "unknown action: " + action})
 		return
@@ -81,7 +100,8 @@ func (s *Server) handleJobAction(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleJobsEvents 是任务事件的 SSE 端点。
-//   GET /api/v1/jobs/events
+//
+//	GET /api/v1/jobs/events
 //
 // 推送两类事件：
 //   - event: live   —— 实时进度帧（内存快照，200ms 合并推送）
@@ -198,7 +218,8 @@ func (s *Server) handleJobsEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleComicJobs 返回**某一本漫画**的全部任务（含实时进度）。
-//   GET /api/v1/jobs/by-comic?source=&comicId=
+//
+//	GET /api/v1/jobs/by-comic?source=&comicId=
 //
 // 用途：详情页的 NAS 存储面板要在同一个弹窗里同时展示
 //   - 已缓存的章节（来自 library 接口）
@@ -269,11 +290,15 @@ func (s *Server) handleComicJobs(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleJobsBulk 批量操作：暂停全部 pending / 重试全部 failed。
-//   POST /api/v1/jobs/bulk  body: {"action": "pause-all"|"resume-all"|"retry-failed"}
+// handleJobsBulk 批量操作：暂停全部 pending / 重试全部 failed / 清理终态任务。
+//
+//	POST /api/v1/jobs/bulk
+//	body: {"action": "pause-all"|"resume-all"|"retry-failed"|"delete-finished",
+//	       "statuses": ["done","failed","cancelled"]}   // 仅 delete-finished 使用
 func (s *Server) handleJobsBulk(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Action string `json:"action"`
+		Action   string   `json:"action"`
+		Statuses []string `json:"statuses"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
@@ -312,6 +337,18 @@ func (s *Server) handleJobsBulk(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 			return
 		}
+		writeJSON(w, http.StatusOK, map[string]any{"affected": n})
+	case "delete-finished":
+		n, err := s.st.DeleteFinishedJobs(req.Statuses)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		// 这些任务已不在库里，清掉残留的内存实时状态，免得面板显示幽灵行
+		if s.hub != nil {
+			s.hub.BumpState()
+		}
+		s.log.Info("jobs bulk delete", "removed", n)
 		writeJSON(w, http.StatusOK, map[string]any{"affected": n})
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "unknown action: " + req.Action})

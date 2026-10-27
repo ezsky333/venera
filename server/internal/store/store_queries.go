@@ -962,6 +962,89 @@ func (s *Store) JobIDsByStatus(status string) ([]int64, error) {
 	return out, rows.Err()
 }
 
+// ErrJobRunning 表示任务正在下载，不能直接删除。
+//
+// 为什么必须拒绝：worker 只在**章节间隙**通过 GetJob 读 message 判断是否
+// 该停下（见 downloader 的 pause 检查）。行被删掉后 GetJob 返回 nil，
+// 那个判断直接失效，worker 会继续把整本漫画下完、继续往 library 里写文件、
+// 继续插 cached_chapters —— 只是任务记录没了，用户既看不见进度也停不下来。
+// 所以"删除运行中的任务"必须先暂停，让 worker 在章节间隙自己退出来。
+var ErrJobRunning = errors.New("job is running; pause it first")
+
+// DeleteJob 删除一条任务记录。
+//
+// 只删任务行，**不动已下载的缓存文件**：缓存是 library 里的实体，
+// 有独立的删除入口（按章节/按漫画删），把两者混在一起会让"清理任务列表"
+// 变成"删掉用户辛苦下好的内容"，代价太大。
+//
+// running 的任务返回 ErrJobRunning，理由见该变量注释。
+func (s *Store) DeleteJob(id int64) (bool, error) {
+	// 先看状态：单条 UPDATE/DELETE 里带 status 条件虽然也能做到，
+	// 但那样无法区分"不存在"和"在运行"，前端就没法给出准确提示。
+	var status string
+	err := s.db.QueryRow(`SELECT status FROM jobs WHERE id = ?`, id).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if status == string(model.JobRunning) {
+		return false, ErrJobRunning
+	}
+	res, err := s.db.Exec(`DELETE FROM jobs WHERE id = ?`, id)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// DeleteFinishedJobs 批量删除处于终态的任务（done / failed / cancelled）。
+//
+// 传 statuses 可只清理其中一部分；空切片表示三种终态全清。
+// 返回实际删除的行数。
+//
+// 只允许终态：pending/paused 是用户还要下载的东西，running 见 ErrJobRunning。
+func (s *Store) DeleteFinishedJobs(statuses []string) (int64, error) {
+	allowed := map[string]bool{
+		string(model.JobDone):      true,
+		string(model.JobFailed):    true,
+		string(model.JobCancelled): true,
+	}
+	var picked []string
+	if len(statuses) == 0 {
+		for k := range allowed {
+			picked = append(picked, k)
+		}
+	} else {
+		for _, st := range statuses {
+			if !allowed[st] {
+				// 静默忽略非法状态，避免一个笔误把 pending 队列清空
+				continue
+			}
+			picked = append(picked, st)
+		}
+	}
+	if len(picked) == 0 {
+		return 0, nil
+	}
+
+	placeholders := strings.Repeat("?,", len(picked))
+	placeholders = placeholders[:len(placeholders)-1]
+	args := make([]any, len(picked))
+	for i, st := range picked {
+		args[i] = st
+	}
+	res, err := s.db.Exec(
+		`DELETE FROM jobs WHERE status IN (`+placeholders+`)`, args...)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // ---------- source registry ----------
 func (s *Store) PutSource(key, name, version, file string) error {
 	_, err := s.db.Exec(
