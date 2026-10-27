@@ -17,6 +17,7 @@ import 'package:venera/pages/downloading_page.dart';
 import 'package:venera/pages/follow_updates_page.dart';
 import 'package:venera/pages/history_page.dart';
 import 'package:venera/pages/image_favorites_page/image_favorites_page.dart';
+import 'package:venera/pages/nas_download_manager.dart';
 import 'package:venera/pages/search_page.dart';
 import 'package:venera/utils/data_sync.dart';
 import 'package:venera/utils/import_comic.dart';
@@ -195,16 +196,35 @@ class _NasOfflineBarState extends State<_NasOfflineBar>
                 : "Covers, details and pages come from NAS".tl,
             style: ts.s12,
           ),
-          trailing: _busy
-              ? const SizedBox(
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (_busy)
+                const SizedBox(
                   width: 18,
                   height: 18,
                   child: CircularProgressIndicator(strokeWidth: 2),
                 )
-              : Switch(
+              else
+                Switch(
                   value: on,
                   onChanged: _toggle,
                 ),
+              // 下载管理的快捷入口。
+              //
+              // 之前只有「设置 → NAS 连接 → NAS Downloads」一条路径，
+              // 用户人在外面想停掉一个跑飞的队列要点四层。首页本来就是
+              // 最容易点到的位置（这个 NAS 模式条就在首页顶部），
+              // 在这里加一个图标按钮最直接。
+              IconButton(
+                icon: const Icon(Icons.download_outlined, size: 20),
+                tooltip: "NAS Downloads".tl,
+                onPressed: () {
+                  App.rootContext.to(() => const NasDownloadManager());
+                },
+              ),
+            ],
+          ),
         ),
       ),
     );

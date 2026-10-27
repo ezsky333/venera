@@ -493,6 +493,10 @@ async function jobAction(id, action) {
 // 两步：先 dryRun 拿计划（会入队多少本、跳过了多少、哪些书），把明细
 // 摊给用户看，确认后再真正入队。不能直接一键入队——收藏可能几百本，
 // 而真正没下过的也许只有个位数，盲点一下就往队列里塞几百条。
+//
+// 预览里额外说明"其中 N 本只是缺新章节"：这个数不为 0 时说明有些书
+// 以前以为下全了、其实源站更新过（旧实现把它们全算进"已缓存"直接跳过，
+// 缺口永远补不上）。
 async function backfillFavorites() {
   let plan;
   try {
@@ -508,14 +512,20 @@ async function backfillFavorites() {
     return;
   }
   const preview = (plan.items || []).slice(0, 15)
-    .map((it, i) => (i + 1) + '. [' + it.source + '] ' + (it.title || it.comicId))
+    .map((it, i) => {
+      const miss = it.missing ? '（缺 ' + it.missing + ' 章）' : '';
+      return (i + 1) + '. [' + it.source + '] ' + (it.title || it.comicId) + miss;
+    })
     .join('\n');
   const more = plan.candidates > 15
     ? '\n… 还有 ' + (plan.candidates - 15) + ' 本' : '';
+  const incremental = plan.incremental
+    ? '\n其中 ' + plan.incremental + ' 本只是缺新章节（已缓存一部分）' : '';
   const msg = '将补录 ' + plan.candidates + ' 本漫画到下载队列\n\n'
     + '按源: ' + bySource + '\n'
     + '已跳过: ' + plan.alreadyCached + ' 本已缓存, '
-    + plan.alreadyQueued + ' 本已在队列\n\n'
+    + plan.alreadyQueued + ' 本已在队列'
+    + incremental + '\n\n'
     + '前几本:\n' + preview + more + '\n\n确定开始下载？';
   if (!confirm(msg)) return;
   try {

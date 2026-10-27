@@ -659,6 +659,18 @@ func mediaType(p string) string {
 
 // ---------- 下载 / 任务 ----------
 
+// handleDownload 请求下载一部漫画（或指定章节）。
+//
+// 关键语义：**增量**。
+//
+// 旧实现调 worker.Enqueue，只要库里有任意一章缓存就返回 409
+// "already cached"，于是"已缓存 10 章、源站更新到 12 章"的用户
+// 无论点多少次"推送到 NAS"都下不到后 2 章——看起来像成功了，
+// 其实什么都没发生。
+//
+// 现在走 EnqueueIncremental：拿源端章节表(chapter_list)与已缓存集合
+// 求差集，只把缺失的章节写进任务。响应里带上 total/cached/missing，
+// 客户端据此能明确告诉用户"只补了 2 章"还是"已经是最新"。
 func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Source   string   `json:"source"`
@@ -679,21 +691,31 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id, err := s.worker.Enqueue(req.Source, req.ComicID, req.Title, "manual", req.Chapters)
+	res, err := s.worker.EnqueueIncremental(req.Source, req.ComicID, req.Title, "manual", req.Chapters)
 	if errors.Is(err, jobs.ErrAlreadyQueued) {
-		writeJSON(w, http.StatusConflict, map[string]any{"error": "already queued"})
-		return
-	}
-	// 已完整缓存：这不是错误，客户端按"无需重复下载"处理即可。
-	if errors.Is(err, jobs.ErrAlreadyCached) {
-		writeJSON(w, http.StatusConflict, map[string]any{"error": "already cached"})
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error": "already queued", "reason": "already-queued",
+		})
 		return
 	}
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"jobId": id, "status": "pending"})
+	if !res.Queued {
+		// 已是最新：不是错误。200 + queued:false 让客户端可以区分
+		// "真的排上了任务" 和 "确实不需要下"。
+		writeJSON(w, http.StatusOK, map[string]any{
+			"queued": false, "reason": res.Reason,
+			"total": res.Total, "cached": res.Cached,
+		})
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"jobId": res.JobID, "status": "pending", "queued": true,
+		"total": res.Total, "cached": res.Cached,
+		"missing": len(res.Missing), "chapters": res.Missing,
+	})
 }
 
 // handleDownloadFavorites 补录"收藏了但没缓存"的漫画到下载队列。

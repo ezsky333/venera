@@ -116,22 +116,29 @@ class NasChapterCache extends ChangeNotifier {
     _safeNotify();
   }
 
-  /// 请求 NAS 下载指定章节（为空表示整本）。
-  Future<bool> requestDownload({List<String>? chapters}) async {
-    if (!NasClient.instance.isEnabled) return false;
+  /// 请求 NAS 下载指定章节（为空表示"补齐所有缺失章节"）。
+  ///
+  /// 返回服务端的判定结果，而不是 bool。原因：服务端现在做增量，
+  /// 不传 chapters 时可能返回
+  ///   - queued=true, missing=2  → 只补了 2 章（这本以前下过）
+  ///   - queued=false/up-to-date → 已经是最新，什么都没做
+  ///   - queued=false/already-queued → 已有同类任务在跑
+  /// 三种情况给用户的话术必须不同，否则"点了一下却没反应"会被当成 bug。
+  Future<NasDownloadRequest?> requestDownload({List<String>? chapters}) async {
+    if (!NasClient.instance.isEnabled) return null;
 
     final targets = chapters ?? const <String>[];
     if (targets.isEmpty) {
-      if (_bulkRequesting) return false;
+      if (_bulkRequesting) return null;
       _bulkRequesting = true;
     } else {
       _requesting.addAll(targets);
     }
     _safeNotify();
 
-    int? jobId;
+    NasDownloadRequest? result;
     try {
-      jobId = await NasClient.instance.requestDownload(
+      result = await NasClient.instance.requestDownload(
         sourceKey: sourceKey,
         comicId: comicId,
         title: title,
@@ -142,10 +149,10 @@ class NasChapterCache extends ChangeNotifier {
       _requesting.removeAll(targets);
     }
 
-    if (jobId != null) {
+    if (result != null && result.queued) {
       // 下载会异步完成；先按"已请求"乐观标记，稍后再刷新真实状态
       if (targets.isEmpty) {
-        // 整本：不猜具体章节，等下一轮刷新
+        // 增量：不猜具体章节，等下一轮刷新
         unawaited(_refreshLater());
       } else {
         _cached = {..._cached, ...targets};
@@ -153,7 +160,7 @@ class NasChapterCache extends ChangeNotifier {
       }
       _safeNotify();
     }
-    return jobId != null;
+    return result;
   }
 
   /// 删除 NAS 上某章的缓存。

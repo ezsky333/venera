@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -206,6 +207,10 @@ func isRetriableError(msg string) bool {
 //
 // 注意：显式指定 chapters 时不算重复——那是用户手动"补下某几章"，
 // 即使整本已缓存也应允许。
+//
+// 收藏自动同步走这条严格路径是正确的：它表达的是"这本我收藏了"，
+// 不是"我要刷新这本"。用户显式点"推送到 NAS"要的是增量，
+// 走 EnqueueIncremental。
 func (w *Worker) Enqueue(source, comicID, title, origin string, chapters []string) (int64, error) {
 	if exists, err := w.st.PendingJobExists(source, comicID); err == nil && exists {
 		return 0, ErrAlreadyQueued
@@ -219,6 +224,139 @@ func (w *Worker) Enqueue(source, comicID, title, origin string, chapters []strin
 		Source: source, ComicID: comicID, Title: title,
 		Chapters: chapters, Origin: origin,
 	})
+}
+
+// EnqueueResult 描述一次"增量入队"做了什么。
+//
+// 为什么要把这些数字回给客户端：用户点"推送到 NAS"时，可能是
+//   - 首次下载（12 章全下）
+//   - 只有 3 章新的（只下这 3 章）
+//   - 已经是最新（一条都不该下）
+//
+// 三种情况的反馈必须不同，否则用户看到"已加入队列"却什么都没发生，
+// 或者看到"已在 NAS 缓存"但其实漏了新章节。
+type EnqueueResult struct {
+	// JobID 新建的任务 id；0 表示没有入队（已是最新 / 已缓存）。
+	JobID int64 `json:"jobId"`
+	// Queued 是否真的创建了任务。
+	Queued bool `json:"queued"`
+	// Total 源端章节总数（0 = 章节表未知）。
+	Total int `json:"total"`
+	// Cached 服务端已缓存的章节数（按源端章节 id 计）。
+	Cached int `json:"cached"`
+	// Missing 本次要下载的章节 id（章节表未知时为空，表示"跑一遍看"）。
+	Missing []string `json:"missing,omitempty"`
+	// Reason 未入队的原因：up-to-date / already-queued。
+	Reason string `json:"reason,omitempty"`
+}
+
+// EnqueueIncremental 以"补齐缺失章节"的语义入队。
+//
+// 这是用户显式动作（详情页「推送到 NAS」）该走的路径：
+//
+//   - 有源端章节表（comics.chapter_list）时，直接和已缓存集合求差集，
+//     只把**新增章节**写进 job.chapters。这样一本 200 话的漫画更新了
+//     3 话，只会重下这 3 话，而不是整本重来。
+//   - 章节表未知（早期下载没记录）时，全量入队；worker 执行时
+//     RunJob 里仍会按 cached_chapters 跳过已缓存章节，代价只是一次
+//     loadInfo。
+//   - 章节表已知且差集为空 → 返回 Queued=false / Reason=up-to-date，
+//     不产生空任务行。
+//
+// 与 Enqueue 的关键区别就在第 1、3 条：Enqueue 只要发现"有任何缓存"
+// 就拒绝，于是"已缓存 10 章、源站更新到 12 章"永远下不到后 2 章。
+func (w *Worker) EnqueueIncremental(source, comicID, title, origin string, explicit []string) (*EnqueueResult, error) {
+	if origin == "" {
+		origin = "manual"
+	}
+	res := &EnqueueResult{}
+	if exists, err := w.st.PendingJobExists(source, comicID); err == nil && exists {
+		res.Reason = "already-queued"
+		return res, ErrAlreadyQueued
+	}
+
+	// 显式章节：用户已经点名了要哪几章，不做差集。
+	if len(explicit) > 0 {
+		res.Missing = explicit
+		id, err := w.st.CreateJob(&model.Job{
+			Source: source, ComicID: comicID, Title: title,
+			Chapters: explicit, Origin: origin,
+		})
+		if err != nil {
+			return nil, err
+		}
+		res.JobID, res.Queued = id, true
+		return res, nil
+	}
+
+	cachedSet, err := w.st.CachedChapterIDs(source, comicID)
+	if err != nil {
+		return nil, err
+	}
+	res.Cached = len(cachedSet)
+
+	list, err := w.st.GetComicChapterList(source, comicID)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(list) == 0 {
+		// 章节表未知：分期情况。
+		//
+		//   - 有缓存 → 认为不需要重下（否则一次补录会把 126 本早期
+		//     下载的漫画全部重跑一遍，实测库里就是这个数）；
+		//   - 没缓存 → 全量入队。
+		//
+		// 这里之所以能直接用"有缓存"判定，是因为章节表为空本身就意味着
+		// 这是画廊型源（源端 detail.Chapters 为空），整本只有一条记录。
+		if len(cachedSet) > 0 {
+			res.Reason = "up-to-date"
+			return res, nil
+		}
+		id, err := w.st.CreateJob(&model.Job{
+			Source: source, ComicID: comicID, Title: title,
+			Chapters: nil, Origin: origin,
+		})
+		if err != nil {
+			return nil, err
+		}
+		res.JobID, res.Queued = id, true
+		return res, nil
+	}
+
+	// 章节表存在时**不**做"整本记录"判断。
+	//
+	// 曾经这里用 cachedSet[comicID] 当整本记录的标志，结果 jm 上踩雷：
+	// jm 的漫画可以有章节 id 恰好等于漫画 id（实测 jm/330218 的章节列表
+	// 里就有一章的 id 是 "330218"），于是整本被判成已缓存，
+	// 真正缺的 3 章永远补不上。
+	//
+	// 正确判据是"章节表是否为空"：整本记录只会在源端没有章节列表时
+	// 产生（见 Downloader.RunJob 里 targets 的兜底），而那种情况下
+	// 上面的 len(list)==0 分支已经处理掉了。
+	res.Total = len(list)
+	var missing []string
+	for _, ch := range list {
+		if cachedSet[ch.ID] {
+			continue
+		}
+		missing = append(missing, ch.ID)
+	}
+	if len(missing) == 0 {
+		res.Reason = "up-to-date"
+		return res, nil
+	}
+
+	res.Missing = missing
+	id, err := w.st.CreateJob(&model.Job{
+		Source: source, ComicID: comicID, Title: title,
+		Chapters: missing, Origin: origin,
+	})
+	if err != nil {
+		return nil, err
+	}
+	res.JobID, res.Queued = id, true
+	return res, nil
 }
 
 // ErrAlreadyQueued 表示同一漫画已有待执行任务。
@@ -241,6 +379,8 @@ type QueuePlanItem struct {
 	Source  string `json:"source"`
 	ComicID string `json:"comicId"`
 	Title   string `json:"title"`
+	// Missing 本章节新增/缺失的章节数；0 表示章节表未知（全量）。
+	Missing int `json:"missing,omitempty"`
 }
 
 // QueuePlan 描述"补录未缓存收藏"这次会做什么。
@@ -255,8 +395,14 @@ type QueuePlan struct {
 	Queued int `json:"queued"`
 	// AlreadyQueued 已有 pending/running 任务，跳过。
 	AlreadyQueued int `json:"alreadyQueued"`
-	// AlreadyCached 库里已有缓存，跳过。
+	// AlreadyCached 库里已有**全部**章节，跳过。
 	AlreadyCached int `json:"alreadyCached"`
+	// Incremental 本次属于"已缓存一部分、只是缺新章节"的漫画数。
+	//
+	// 单独计数很有必要：这个数字不为 0 时，说明用户以前以为
+	// "已经下全了"，其实源站后来更新过。旧实现会把这些书全部
+	// 算进 AlreadyCached 直接跳过，缺口永远补不上。
+	Incremental int `json:"incremental"`
 	// Failed 入队过程出错的数量（单条失败不中断整批）。
 	Failed int `json:"failed"`
 	// BySource 待入队/已入队的漫画按源分布。
@@ -269,6 +415,44 @@ type QueuePlan struct {
 
 // previewLimit 预览明细最多返回多少条（面板只看前几十条就够）。
 const previewLimit = 50
+
+// favoriteCoverage 判断一本收藏"还缺什么"。
+//
+// 三态：
+//   - complete：章节表已知，且每一章都已缓存 → 无事可做；
+//   - partial：有缓存但章节表里还有未缓存的章 → 需要增量补；
+//   - empty：完全没缓存 → 需要全量下。
+//
+// 章节表未知（早期下载没记录 chapter_list）时退回"有缓存即 complete"，
+// 否则一次补录会把 126 本早期漫画全部重跑一遍（实测库里就是这个数）。
+func (w *Worker) favoriteCoverage(source, comicID string) (state string, missing int) {
+	cachedSet, err := w.st.CachedChapterIDs(source, comicID)
+	if err != nil {
+		return "empty", 0
+	}
+	list, err := w.st.GetComicChapterList(source, comicID)
+	if err != nil || len(list) == 0 {
+		// 章节表未知（画廊型源，或早期下载没记录）：
+		// 有缓存即视为完整，避免把存量整体重跑。
+		if len(cachedSet) > 0 {
+			return "complete", 0
+		}
+		return "empty", 0
+	}
+	n := 0
+	for _, ch := range list {
+		if !cachedSet[ch.ID] {
+			n++
+		}
+	}
+	if n == 0 {
+		return "complete", 0
+	}
+	if len(cachedSet) > 0 {
+		return "partial", n
+	}
+	return "empty", n
+}
 
 // QueueFavoritesDetailed 规划并（可选）执行"补录未缓存的收藏"。
 //
@@ -303,30 +487,47 @@ func (w *Worker) QueueFavoritesDetailed(dryRun bool, origin string) (*QueuePlan,
 			plan.AlreadyQueued++
 			continue
 		}
-		// 已缓存的跳过：这个入口明确是"补下没下过的收藏"，
-		// 重复排队只会白跑 loadInfo/loadEp 再全部 skip。
-		if cached, _ := w.st.HasCachedChapters(f.Source, f.ID); cached {
+
+		// 覆盖率判定：只有"章节表里每一章都已缓存"才算无事可做。
+		state, missingCount := w.favoriteCoverage(f.Source, f.ID)
+		if state == "complete" {
 			plan.AlreadyCached++
 			continue
 		}
 
+		if state == "partial" {
+			plan.Incremental++
+		}
 		plan.Candidates++
 		plan.BySource[f.Source]++
 		if len(plan.Items) < previewLimit {
 			plan.Items = append(plan.Items, QueuePlanItem{
 				Source: f.Source, ComicID: f.ID, Title: f.Title,
+				Missing: missingCount,
 			})
 		}
 
 		if dryRun {
 			continue
 		}
-		if _, err := w.st.CreateJob(&model.Job{
-			Source: f.Source, ComicID: f.ID, Title: f.Title,
-			Origin: origin,
-		}); err != nil {
+		// 执行时复用 EnqueueIncremental：它会再算一次差集并把结果写进
+		// job.chapters，从而只下缺的章节，不会整本重跑。
+		r, err := w.EnqueueIncremental(f.Source, f.ID, f.Title, origin, nil)
+		if err != nil {
+			if errors.Is(err, ErrAlreadyQueued) {
+				plan.AlreadyQueued++
+				plan.Candidates--
+				plan.BySource[f.Source]--
+				continue
+			}
 			// 单条失败不中断整批：一本坏数据不该让剩下几百本都排不上
 			plan.Failed++
+			continue
+		}
+		if !r.Queued {
+			plan.AlreadyCached++
+			plan.Candidates--
+			plan.BySource[f.Source]--
 			continue
 		}
 		plan.Queued++

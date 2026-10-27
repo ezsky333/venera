@@ -478,13 +478,19 @@ void _showNasChapterMenu(
             enabled: !cached,
             onTap: () async {
               Navigator.of(ctx).pop();
-              final ok = await cache.requestDownload(chapters: [chapterId]);
+              final res = await cache.requestDownload(chapters: [chapterId]);
               if (!context.mounted) return;
-              context.showMessage(
-                message: ok
-                    ? "Queued download to NAS".tl
-                    : "Failed to request NAS download".tl,
-              );
+              if (res == null) {
+                context.showMessage(
+                  message: "Failed to request NAS download".tl,
+                );
+              } else if (res.queued) {
+                context.showMessage(message: "Queued download to NAS".tl);
+              } else if (res.isAlreadyQueued) {
+                context.showMessage(message: "Queued on NAS".tl);
+              } else {
+                context.showMessage(message: "Already cached on NAS".tl);
+              }
             },
           ),
           if (cached)
@@ -630,14 +636,18 @@ class _NasCacheInfoBarState extends State<_NasCacheInfoBar> {
     final cache = _cache;
     if (cache == null) return;
     setState(() => _busy = true);
-    final ok = await cache.requestDownload(chapters: [chapterId]);
+    final res = await cache.requestDownload(chapters: [chapterId]);
     if (!mounted) return;
     setState(() => _busy = false);
-    context.showMessage(
-      message: ok
-          ? "Queued download to NAS".tl
-          : "Failed to request NAS download".tl,
-    );
+    if (res == null) {
+      context.showMessage(message: "Failed to request NAS download".tl);
+    } else if (res.queued) {
+      context.showMessage(message: "Queued download to NAS".tl);
+    } else if (res.isAlreadyQueued) {
+      context.showMessage(message: "Queued on NAS".tl);
+    } else {
+      context.showMessage(message: "Already cached on NAS".tl);
+    }
   }
 
   Future<void> _delete(String chapterId) async {

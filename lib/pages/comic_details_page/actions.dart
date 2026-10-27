@@ -146,6 +146,19 @@ abstract mixin class _ComicPageActions {
   ///
   /// 与 [download]（下载到本机）是两条独立路径：NAS 上的副本可以在所有
   /// 设备间共享，本机副本只对当前设备可见。
+  ///
+  /// **增量语义（关键）**：这里不再自己判断"已缓存就拦住"，而是把判断
+  /// 交给服务端。服务端拿源端章节表与已缓存集合求差集，只下缺的章节。
+  ///
+  /// 旧行为（用户报的问题）：
+  ///   ```dart
+  ///   if (cached.length >= total) { 提示已缓存; return; }
+  ///   ```
+  /// 它只按**已缓存章节数 ≥ 章节总数**判断，于是"已缓存 10 章、
+  /// 源站更新到 12 章"时 cached=10 < total=12 会放行，但服务端那边
+  /// 只要发现有任何缓存就回 409 already cached，后 2 章永远下不到；
+  /// 而如果是「源站章节数没变、但内容重传」，cached>=total 又会被这里
+  /// 直接拦死。两头都不对。
   Future<void> downloadToNas() async {
     final client = NasClient.instance;
     if (!client.isEnabled) {
@@ -163,34 +176,45 @@ abstract mixin class _ComicPageActions {
       return;
     }
 
-    // 已缓存则直接提示
-    try {
-      final cached = await client.cachedChapters(comic.sourceKey, comic.id);
-      final total = comic.chapters?.length ?? 0;
-      if (total > 0 && cached.length >= total) {
-        App.rootContext.showMessage(message: "Already cached on NAS".tl);
-        return;
-      }
-    } catch (_) {
-      // 查询失败不阻断下载请求
-    }
-
-    final jobId = await client.requestDownload(
+    final res = await client.requestDownload(
       sourceKey: comic.sourceKey,
       comicId: comic.id,
       title: comic.title,
     );
-    if (jobId == null) {
+    if (res == null) {
       App.rootContext.showMessage(message: "Failed to queue NAS download".tl);
       return;
     }
+
+    // 三种结果分别给话术，用户才知道"点了到底干了什么"
+    if (res.isUpToDate) {
+      App.rootContext.showMessage(
+        message: res.total > 0
+            ? "${"Already cached on NAS".tl} (${res.total})"
+            : "Already cached on NAS".tl,
+      );
+      return;
+    }
+    if (res.isAlreadyQueued) {
+      App.rootContext.showMessage(message: "Queued on NAS".tl);
+      return;
+    }
+
     // 插值不能放进 .tl 的键里（键是字面量，带变量就永远命中不了翻译表）
+    final detail = res.total > 0 && res.missing > 0 && res.missing < res.total
+        // 增量：明确告诉用户只补了几章，否则他会以为整本重下了
+        ? " (${"Missing @n chapters".tlParams({'n': '${res.missing}'})})"
+        : "";
     App.rootContext.showMessage(
-      message: "${"Queued on NAS".tl} (#$jobId)",
+      message: "${"Queued on NAS".tl}$detail (#${res.jobId})",
     );
 
+    // 缓存状态已变（服务端会陆续写入），让详情页角标尽早重查
+    NasChapterCache.invalidate(comic.sourceKey, comic.id);
+    nasCache?.load(force: true);
+
     // 轻量进度反馈：轮询直到完成或失败（避免用户不知道进度）
-    _watchNasJob(client, jobId);
+    _watchNasJob(client, res.jobId!);
   }
 
   /// 轮询 NAS 任务进度，结束后提示。
@@ -201,6 +225,9 @@ abstract mixin class _ComicPageActions {
       if (job == null) continue;
       final status = job['status']?.toString() ?? '';
       if (status == 'done') {
+        // 下载完成后角标必须重查：服务端此刻才真正写入 cached_chapters
+        NasChapterCache.invalidate(comic.sourceKey, comic.id);
+        nasCache?.load(force: true);
         App.rootContext.showMessage(
           message: "NAS download complete".tl,
         );
@@ -439,15 +466,7 @@ abstract mixin class _ComicPageActions {
             MenuEntry(
               icon: Icons.cloud_download_outlined,
               text: "Download whole comic to NAS".tl,
-              onClick: () async {
-                final ok =
-                    await nasCache!.requestDownload();
-                context.showMessage(
-                  message: ok
-                      ? "Queued download to NAS".tl
-                      : "Failed to request NAS download".tl,
-                );
-              },
+              onClick: downloadToNas,
             ),
             if (nasCache!.cachedChapters.isNotEmpty)
               MenuEntry(

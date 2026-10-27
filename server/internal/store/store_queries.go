@@ -595,6 +595,29 @@ func (s *Store) HasCachedChapters(source, comicID string) (bool, error) {
 	return n > 0, nil
 }
 
+// CachedChapterIDs 返回某漫画已缓存的章节 ID 集合。
+//
+// 比 ListCachedByComic 轻：只取 chapter_id 一列，供"求源端章节表与
+// 已缓存集合的差集"使用（增量下载判断）。
+func (s *Store) CachedChapterIDs(source, comicID string) (map[string]bool, error) {
+	rows, err := s.db.Query(
+		`SELECT chapter_id FROM cached_chapters WHERE source = ? AND comic_id = ?`,
+		source, comicID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = true
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) ListCachedByComic(source, comicID string) ([]model.CachedChapter, error) {
 	rows, err := s.db.Query(
 		`SELECT source, comic_id, chapter_id, chapter_title, dir, page_count, cover, bytes, created_at

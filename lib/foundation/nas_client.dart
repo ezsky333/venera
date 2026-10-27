@@ -106,6 +106,54 @@ class NasLibraryItem {
   });
 }
 
+/// 一页任务列表（与 /api/v1/admin/jobs 的返回对应）。
+class NasJobPage {
+  const NasJobPage({required this.jobs, required this.total});
+
+  final List<Map<String, dynamic>> jobs;
+
+  /// 服务端总数（不受本页 limit 限制），用于分页提示。
+  final int total;
+
+  bool get isEmpty => jobs.isEmpty;
+}
+
+/// 一次 NAS 下载请求的结果。
+///
+/// 服务端返回三种情形，客户端的反馈语必须不同：
+///   - queued=true          → 排上了任务，可能只是补几章（见 [missing]）
+///   - queue=false/up-to-date   → 全都是最新的，不需要下
+///   - queued=false/already-queued → 已有同类任务在跑
+class NasDownloadRequest {
+  const NasDownloadRequest({
+    required this.queued,
+    this.jobId,
+    this.total = 0,
+    this.cached = 0,
+    this.missing = 0,
+    this.reason = '',
+  });
+
+  final bool queued;
+  final int? jobId;
+
+  /// 源端章节总数（0 = 章节表未知）。
+  final int total;
+
+  /// 服务端已缓存章节数。
+  final int cached;
+
+  /// 本次要补的章节数。
+  final int missing;
+
+  /// 未入队原因：up-to-date / already-queued。
+  final String reason;
+
+  bool get isUpToDate => !queued && reason == 'up-to-date';
+
+  bool get isAlreadyQueued => !queued && reason == 'already-queued';
+}
+
 /// NAS 在线状态。
 enum NasStatus {
   /// 未配置
@@ -550,7 +598,13 @@ class NasClient {
   }
 
   /// 请求 NAS 下载一部漫画（或指定章节）。
-  Future<int?> requestDownload({
+  ///
+  /// 服务端已改成**增量**语义：不传 chapters 时，它拿源端章节表与
+  /// 已缓存集合求差集，只把缺失的章节写进任务。返回 [NasDownloadRequest]
+  /// 而不是裸 jobId，因为"已经是最新"和"排上了任务"必须能被区分开——
+  /// 旧实现只用 jobId != null 判断，服务端返回 409 already cached 时
+  /// 客户端只会得到 null，用户看到"请求失败"，实际是本来就不用下。
+  Future<NasDownloadRequest?> requestDownload({
     required String sourceKey,
     required String comicId,
     String? title,
@@ -566,8 +620,31 @@ class NasClient {
         if (title != null) 'title': title,
         if (chapters != null) 'chapters': chapters,
       });
-      if (res.statusCode == 202 && res.data is Map) {
-        return (res.data['jobId'] as num?)?.toInt();
+      if (res.data is! Map) return null;
+      final m = Map<String, dynamic>.from(res.data);
+      if (res.statusCode == 202) {
+        return NasDownloadRequest(
+          queued: true,
+          jobId: (m['jobId'] as num?)?.toInt(),
+          total: (m['total'] as num?)?.toInt() ?? 0,
+          cached: (m['cached'] as num?)?.toInt() ?? 0,
+          missing: (m['missing'] as num?)?.toInt() ?? 0,
+        );
+      }
+      if (res.statusCode == 200) {
+        // 已是最新：不是失败
+        return NasDownloadRequest(
+          queued: false,
+          reason: m['reason']?.toString() ?? 'up-to-date',
+          total: (m['total'] as num?)?.toInt() ?? 0,
+          cached: (m['cached'] as num?)?.toInt() ?? 0,
+        );
+      }
+      if (res.statusCode == 409) {
+        return NasDownloadRequest(
+          queued: false,
+          reason: m['reason']?.toString() ?? 'already-queued',
+        );
       }
       return null;
     } catch (e) {
@@ -615,21 +692,39 @@ class NasClient {
   }
 
   /// 列出 NAS 上的下载任务（供「下载管理」页使用）。
-  Future<List<Map<String, dynamic>>> jobs({String? status, int limit = 200}) async {
-    if (!isEnabled) return [];
+  ///
+  /// 走 /api/v1/admin/jobs：它同时返回 jobs 和 total，App 侧才能做分页
+  /// 与"共 N 条"的提示（/api/v1/jobs 只有列表）。
+  Future<NasJobPage> jobsPage({
+    String? status,
+    int limit = 50,
+    int offset = 0,
+  }) async {
+    if (!isEnabled) return const NasJobPage(jobs: [], total: 0);
     final dio = _dio;
-    if (dio == null) return [];
+    if (dio == null) return const NasJobPage(jobs: [], total: 0);
     try {
       var res = await dio.get('/api/v1/admin/jobs', queryParameters: {
         if (status != null && status.isNotEmpty) 'status': status,
         'limit': limit,
+        'offset': offset,
       });
-      if (res.statusCode != 200 || res.data is! Map) return [];
-      var list = (res.data['jobs'] as List?) ?? [];
-      return list.map((e) => Map<String, dynamic>.from(e as Map)).toList();
+      if (res.statusCode != 200 || res.data is! Map) {
+        return const NasJobPage(jobs: [], total: 0);
+      }
+      final list = (res.data['jobs'] as List?) ?? [];
+      final jobs = list.map((e) => Map<String, dynamic>.from(e as Map)).toList();
+      final total = (res.data['total'] as num?)?.toInt() ?? jobs.length;
+      return NasJobPage(jobs: jobs, total: total);
     } catch (e) {
-      return [];
+      return const NasJobPage(jobs: [], total: 0);
     }
+  }
+
+  /// 列出 NAS 上的下载任务（只要列表的简版，兼容旧调用）。
+  Future<List<Map<String, dynamic>>> jobs({String? status, int limit = 200}) async {
+    final page = await jobsPage(status: status, limit: limit);
+    return page.jobs;
   }
 
   /// 取消一个任务。
@@ -642,6 +737,74 @@ class NasClient {
       return res.statusCode == 200;
     } catch (e) {
       return false;
+    }
+  }
+
+  /// 对单个任务执行管理动作。
+  ///
+  /// 与 Web 管理面板共用同一套端点 `POST /api/v1/jobs/{id}/{action}`，
+  /// 因此 App 里能做的和面板里完全一致：
+  /// pause / resume / top / untop / cancel / retry / delete。
+  ///
+  /// 返回服务端的 `result` 文案；失败时返回 null（调用方给通用提示）。
+  /// 注意 delete 对 running 任务会被服务端拒绝（409）：worker 靠 jobs
+  /// 行里的 message 判断该不该停，行没了它就停不下来，必须先暂停。
+  Future<String?> jobAction(int jobId, String action) async {
+    if (!isEnabled) return null;
+    final dio = _dio;
+    if (dio == null) return null;
+    try {
+      var res = await dio.post('/api/v1/jobs/$jobId/$action', data: {});
+      if (res.statusCode == 200 && res.data is Map) {
+        return res.data['result']?.toString() ?? action;
+      }
+      // 409 等冲突：把服务端的中文错误原样抛给 UI，比“操作失败”有用
+      if (res.data is Map && res.data['error'] != null) {
+        return '!${res.data['error']}';
+      }
+      return null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /// 批量操作：pause-all / resume-all / retry-failed / delete-finished。
+  ///
+  /// 返回受影响的任务数；失败返回 null（与 0 区分：0 是“确实没有可做的”）。
+  Future<int?> bulkJobs(String action, {List<String>? statuses}) async {
+    if (!isEnabled) return null;
+    final dio = _dio;
+    if (dio == null) return null;
+    try {
+      var res = await dio.post('/api/v1/jobs/bulk', data: {
+        'action': action,
+        if (statuses != null) 'statuses': statuses,
+      });
+      if (res.statusCode != 200 || res.data is! Map) return null;
+      return (res.data['affected'] as num?)?.toInt() ?? 0;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /// 补录“收藏了但没缓存（或只缓存了一部分）”的漫画。
+  ///
+  /// dryRun=true 只拿计划，让用户先看到会入队多少本、跳过多少、
+  /// 其中多少本是“只缺新章节”。收藏可能几百本，真没下过的也许
+  /// 只有个位数，不给预览就只能盲点。
+  Future<NasQueuePlan?> queueFavorites({bool dryRun = true}) async {
+    if (!isEnabled) return null;
+    final dio = _dio;
+    if (dio == null) return null;
+    try {
+      var res = await (dryRun
+          ? dio.get('/api/v1/jobs/queue-favorites',
+              queryParameters: {'dryRun': '1'})
+          : dio.post('/api/v1/jobs/queue-favorites', data: {}));
+      if (res.statusCode != 200 || res.data is! Map) return null;
+      return NasQueuePlan.fromJson(Map<String, dynamic>.from(res.data));
+    } catch (e) {
+      return null;
     }
   }
 
@@ -660,6 +823,22 @@ class NasClient {
       return 0;
     } catch (e) {
       return 0;
+    }
+  }
+
+  /// 服务端总览（与 Web 面板顶部同一份数据）。
+  Future<Map<String, dynamic>?> stats() async {
+    if (!isEnabled) return null;
+    final dio = _dio;
+    if (dio == null) return null;
+    try {
+      var res = await dio.get('/api/v1/admin/stats');
+      if (res.statusCode == 200 && res.data is Map) {
+        return Map<String, dynamic>.from(res.data);
+      }
+      return null;
+    } catch (e) {
+      return null;
     }
   }
 
@@ -958,6 +1137,90 @@ class NasClient {
     appdata.settings['nasClientId'] = id;
     return id;
   }
+}
+
+/// 补录计划的快照（对应服务端 jobs.QueuePlan）。
+class NasQueuePlan {
+  const NasQueuePlan({
+    required this.candidates,
+    required this.queued,
+    required this.alreadyQueued,
+    required this.alreadyCached,
+    required this.incremental,
+    required this.failed,
+    required this.bySource,
+    required this.items,
+    required this.dryRun,
+  });
+
+  final int candidates;
+  final int queued;
+  final int alreadyQueued;
+  final int alreadyCached;
+
+  /// 其中"已缓存一部分、只缺新章节"的本数。
+  ///
+  /// 这个数不为 0 说明用户以前以为已经下全了，其实源站更新过。
+  final int incremental;
+  final int failed;
+  final Map<String, int> bySource;
+  final List<NasQueuePlanItem> items;
+  final bool dryRun;
+
+  static NasQueuePlan fromJson(Map<String, dynamic> m) {
+    final bySource = <String, int>{};
+    final raw = m['bySource'];
+    if (raw is Map) {
+      raw.forEach((k, v) {
+        if (v is num) bySource[k.toString()] = v.toInt();
+      });
+    }
+    final items = <NasQueuePlanItem>[];
+    final rawItems = m['items'];
+    if (rawItems is List) {
+      for (final e in rawItems) {
+        if (e is Map) {
+          items.add(NasQueuePlanItem.fromJson(Map<String, dynamic>.from(e)));
+        }
+      }
+    }
+    int i(String k) => (m[k] as num?)?.toInt() ?? 0;
+    return NasQueuePlan(
+      candidates: i('candidates'),
+      queued: i('queued'),
+      alreadyQueued: i('alreadyQueued'),
+      alreadyCached: i('alreadyCached'),
+      incremental: i('incremental'),
+      failed: i('failed'),
+      bySource: bySource,
+      items: items,
+      dryRun: m['dryRun'] == true,
+    );
+  }
+}
+
+/// 补录计划里的一本漫画。
+class NasQueuePlanItem {
+  const NasQueuePlanItem({
+    required this.source,
+    required this.comicId,
+    required this.title,
+    required this.missing,
+  });
+
+  final String source;
+  final String comicId;
+  final String title;
+
+  /// 本次要补的章节数；0 表示章节表未知（整本跑一遍）。
+  final int missing;
+
+  static NasQueuePlanItem fromJson(Map<String, dynamic> m) => NasQueuePlanItem(
+        source: m['source']?.toString() ?? '',
+        comicId: m['comicId']?.toString() ?? '',
+        title: m['title']?.toString() ?? '',
+        missing: (m['missing'] as num?)?.toInt() ?? 0,
+      );
 }
 
 /// 收藏夹角标用的"NAS 已缓存漫画"索引。
