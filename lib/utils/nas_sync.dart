@@ -243,6 +243,14 @@ class NasSync with ChangeNotifier {
       'type': 'history.update',
       'payload': buildHistoryOpPayload(h),
     });
+    // 留痕：阅读进度是本项目最容易"静默丢失"的一环
+    //（曾经因为 payload 里混入 Set 导致整批 push 抛异常，
+    //  表现就是"读了书、服务端一条都没有"）。
+    Log.info(
+      'NAS Sync',
+      'enqueue history: ${h.type.sourceKey}/${h.id} ep=${h.ep} page=${h.page} '
+      'pending=${_pendingOps.length}',
+    );
     _scheduleFlush();
   }
 
@@ -329,6 +337,12 @@ class NasSync with ChangeNotifier {
         }
         _lastError = null;
         sent = ops.length;
+        // 成功也要留痕：否则"读了书但服务端没收到"这种问题
+        // 只能靠翻服务端 ops 表才发现（日志里一片安静）。
+        Log.info(
+          'NAS Sync',
+          'flush ok: pushed=${ops.length} (batch=${batch.length}) cursor=$cursor',
+        );
         _applyWarnings(res.data['warnings']);
       } else {
         _lastError = 'push failed: ${res.statusCode}';

@@ -30,6 +30,16 @@ class _ComicThumbnailsState extends State<_ComicThumbnails> {
 
   void loadNext() async {
     if (state.comicSource.loadComicThumbnail == null) return;
+    // 离线模式下不拉缩略图。
+    //
+    // 这是"详情页明明走了 NAS 却还在连源站"的最后一个漏点：
+    // 详情主体由 NAS 兜底渲染成功后，这个组件仍会调
+    // loadComicThumbnail → 向 ehentai 请求 gallery 页面 + hath.network 缩略图。
+    // 用户看到的网络面板就是"打开详情页，ehentai 请求照样飞出去"。
+    //
+    // 代价：离线模式下的详情页没有缩略图画廊。这是可接受的——
+    // 缩略图本来就是锦上添花，而"离线时不该有任何源站请求"是硬要求。
+    if (NasOfflineMode.instance.preferNasOnly) return;
     if (!isInitialLoading && next == null) {
       return;
     }

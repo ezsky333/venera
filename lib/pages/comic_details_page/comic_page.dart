@@ -342,9 +342,12 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
 
     Res<ComicDetails> res;
     try {
+      // 12 秒对"源站必然失败"的场景（ehentai 未登录、站点被墙）太长：
+      // 用户点进详情页要对着转圈等满 12 秒，体感就是"打不开"。
+      // 8 秒足够覆盖正常网络下最慢的详情页，又能让降级快一点。
       res = await comicSource
           .loadComicInfo!(widget.id)
-          .timeout(const Duration(seconds: 12));
+          .timeout(const Duration(seconds: 8));
     } catch (e) {
       Log.info('NAS', 'source loadComicInfo failed/timeout: $e');
       res = Res.error(e.toString());
@@ -353,12 +356,27 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
 
     if (!NasClient.instance.isEnabled) return res;
 
+    // 源站失败 → 立刻试 NAS 兜底。
+    //
+    // 注意这里**不看**离线模式开关：源站都已经失败了，NAS 有数据就该用。
+    // 之前的实现只在离线模式下才先问 NAS，导致"没开离线模式 + ehentai
+    // 未登录"时，用户要白等超时才看到兜底内容——表现就是
+    // "ehentai 详情页不加载"。
+    //
+    // 短超时：走到这里说明源站已经浪费了时间，不能再等 NAS 默认的
+    // 5s 连接 + 20s 接收。局域网要么秒回要么不在。
     final fb = await NasClient.instance.comicFallback(
       sourceKey: widget.sourceKey,
       comicId: widget.id,
+      fastTimeout: true,
     );
     if (fb == null || fb.isEmpty) {
       // NAS 也没有 → 保持原有错误提示，别把真实原因藏起来
+      Log.info(
+        'NAS',
+        'detail fallback miss for ${widget.sourceKey}/${widget.id} '
+        '(source error: ${res.errorMessage})',
+      );
       return res;
     }
 
