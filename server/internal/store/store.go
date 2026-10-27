@@ -219,6 +219,16 @@ func (s *Store) migrate() error {
 	if err := s.ensureColumn("jobs", "priority", "INTEGER DEFAULT 0"); err != nil {
 		return err
 	}
+	// comics 的展示字段：NAS 兜底详情页需要它们才不会丢作者/简介。
+	if err := s.ensureColumn("comics", "author", "TEXT"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("comics", "uploader", "TEXT"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("comics", "description", "TEXT"); err != nil {
+		return err
+	}
 	return nil
 }
 

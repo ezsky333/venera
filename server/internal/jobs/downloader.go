@@ -200,6 +200,26 @@ func (d *Downloader) RunJob(jobID int64, detail *model.ComicDetail) error {
 		d.logf("save chapter list failed for %s: %v", detail.ID, err)
 	}
 
+	// 落库漫画元信息（作者/上传者/简介/标签）。
+	//
+	// 之前只靠收藏同步写这些字段，于是"只下载、没收藏"的漫画在
+	// 兜底详情页上会缺作者与简介；而收藏同步带的也是精简字段
+	// （没有 description/uploader）。下载时 detail 里有最全的一份，
+	// 在这里写进去，离线兜底页才和在线页一致。
+	if err := d.store.UpsertComic(model.Comic{
+		Source:      detail.Source,
+		ID:          detail.ID,
+		Title:       detail.Title,
+		Subtitle:    detail.Subtitle,
+		Cover:       detail.Cover,
+		Tags:        detail.Tags,
+		Author:      detail.Author,
+		Uploader:    detail.Uploader,
+		Description: detail.Description,
+	}, 0); err != nil {
+		d.logf("save comic meta failed for %s: %v", detail.ID, err)
+	}
+
 	comicDir := comicDirName(detail.Title, detail.ID)
 	baseDir := filepath.Join(d.store.LibraryDir(), comicDir)
 	if err := os.MkdirAll(baseDir, 0o755); err != nil {

@@ -11,6 +11,14 @@ type Comic struct {
 	Subtitle string `json:"subtitle,omitempty"`
 	Cover  string `json:"cover,omitempty"`
 	Tags   []string `json:"tags,omitempty"`
+	// Author / Uploader / Description 供 NAS 兜底详情页使用。
+	//
+	// 这些字段源站的 ComicDetails 里有，但下载时若只存 title/cover，
+	// 离线兜底页就会丢掉作者、汉化组、上传者和简介——用户会看到
+	// "缓存的详情信息不完整"，与在线页面明显不一致。
+	Author      string `json:"author,omitempty"`
+	Uploader    string `json:"uploader,omitempty"`
+	Description string `json:"description,omitempty"`
 	// MaxPage 仅在无章节的漫画（单本）中有意义。
 	MaxPage *int `json:"maxPage,omitempty"`
 }

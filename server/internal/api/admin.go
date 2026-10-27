@@ -276,6 +276,17 @@ func (s *Server) handleComicFallback(w http.ResponseWriter, r *http.Request) {
 		out["title"] = title
 		out["subtitle"] = subtitle
 		out["tags"] = c.Tags
+		// 作者 / 上传者 / 简介：兜底详情页要和在线页一致，
+		// 否则用户看到的是"信息缺失"的副本。
+		if c.Author != "" {
+			out["author"] = c.Author
+		}
+		if c.Uploader != "" {
+			out["uploader"] = c.Uploader
+		}
+		if c.Description != "" {
+			out["description"] = c.Description
+		}
 	}
 
 	// 已缓存章节

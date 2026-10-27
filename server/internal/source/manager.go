@@ -576,6 +576,10 @@ func (m *Manager) LoadDetail(key, comicID string) (*model.ComicDetail, error) {
 			return JSON.stringify({
 				title: d.title || "", subtitle: d.subtitle || d.subTitle || "",
 				cover: d.cover || "", description: d.description || "",
+				// 作者 / 上传者：App 的 ComicDetails 用 author / uploader
+				// （部分源写作 uploader，多数把作者塞在 tags 里，
+				// 这里两个字段都尝试，拿不到就留空）。
+				author: d.author || "", uploader: d.uploader || "",
 				tags: d.tags || {}, maxPage: d.maxPage === undefined ? null : d.maxPage,
 				chapters
 			});
@@ -590,6 +594,8 @@ func (m *Manager) LoadDetail(key, comicID string) (*model.ComicDetail, error) {
 			Subtitle    string `json:"subtitle"`
 			Cover       string `json:"cover"`
 			Description string `json:"description"`
+			Author      string `json:"author"`
+			Uploader    string `json:"uploader"`
 			// tags 在不同源里既可能是 map[string][]string，也可能是
 			// map[string]string 或扁平数组，这里用 RawMessage 兼容。
 			Tags    json.RawMessage `json:"tags"`
@@ -608,6 +614,8 @@ func (m *Manager) LoadDetail(key, comicID string) (*model.ComicDetail, error) {
 			Comic: model.Comic{
 				Source: key, ID: comicID, Title: payload.Title,
 				Subtitle: payload.Subtitle, Cover: payload.Cover, MaxPage: payload.MaxPage,
+				Author: payload.Author, Uploader: payload.Uploader,
+				Description: payload.Description,
 			},
 			Description: payload.Description,
 		}

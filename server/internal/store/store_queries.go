@@ -15,16 +15,21 @@ import (
 func (s *Store) UpsertComic(c model.Comic, sourceType int32) error {
 	tags, _ := json.Marshal(c.Tags)
 	_, err := s.db.Exec(
-		`INSERT INTO comics(source, comic_id, title, subtitle, cover, tags, source_type, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO comics(source, comic_id, title, subtitle, cover, tags, source_type, updated_at,
+		                    author, uploader, description)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(source, comic_id) DO UPDATE SET
 		   title = COALESCE(NULLIF(excluded.title,''), comics.title),
 		   subtitle = COALESCE(NULLIF(excluded.subtitle,''), comics.subtitle),
 		   cover = COALESCE(NULLIF(excluded.cover,''), comics.cover),
 		   tags = COALESCE(NULLIF(excluded.tags,'[]'), comics.tags),
+		   author = COALESCE(NULLIF(excluded.author,''), comics.author),
+		   uploader = COALESCE(NULLIF(excluded.uploader,''), comics.uploader),
+		   description = COALESCE(NULLIF(excluded.description,''), comics.description),
 		   source_type = excluded.source_type,
 		   updated_at = excluded.updated_at`,
-		c.Source, c.ID, c.Title, c.Subtitle, c.Cover, string(tags), sourceType, time.Now().UnixMilli(),
+		c.Source, c.ID, c.Title, c.Subtitle, c.Cover, string(tags), sourceType,
+		time.Now().UnixMilli(), c.Author, c.Uploader, c.Description,
 	)
 	return err
 }
@@ -81,11 +86,14 @@ func (s *Store) GetComicChapterList(source, comicID string) ([]model.Chapter, er
 
 func (s *Store) GetComic(source, comicID string) (*model.Comic, error) {
 	var c model.Comic
-	var tags sql.NullString
+	var tags, author, uploader, desc sql.NullString
 	err := s.db.QueryRow(
-		`SELECT source, comic_id, title, subtitle, cover, tags FROM comics WHERE source = ? AND comic_id = ?`,
+		`SELECT source, comic_id, title, subtitle, cover, tags,
+		        COALESCE(author,''), COALESCE(uploader,''), COALESCE(description,'')
+		 FROM comics WHERE source = ? AND comic_id = ?`,
 		source, comicID,
-	).Scan(&c.Source, &c.ID, &c.Title, &c.Subtitle, &c.Cover, &tags)
+	).Scan(&c.Source, &c.ID, &c.Title, &c.Subtitle, &c.Cover, &tags,
+		&author, &uploader, &desc)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -95,6 +103,9 @@ func (s *Store) GetComic(source, comicID string) (*model.Comic, error) {
 	if tags.Valid && tags.String != "" {
 		_ = json.Unmarshal([]byte(tags.String), &c.Tags)
 	}
+	c.Author = author.String
+	c.Uploader = uploader.String
+	c.Description = desc.String
 	return &c, nil
 }
 

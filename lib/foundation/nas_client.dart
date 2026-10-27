@@ -128,6 +128,15 @@ class NasComicFallback {
   final String cover;
   final List<String> tags;
 
+  /// 作者 / 上传者 / 简介。
+  ///
+  /// 服务端下载时会把这些一并落库（comics 表的 author/uploader/description）。
+  /// 早期只存 title+cover+tags，导致离线兜底详情页缺作者、缺简介，
+  /// 与在线页明显不一致（用户实测反馈"缓存的详情信息不匹配"）。
+  final String author;
+  final String uploader;
+  final String description;
+
   /// 已缓存章节：章节 id / 标题 / 页数。
   final List<NasFallbackChapter> chapters;
 
@@ -147,6 +156,9 @@ class NasComicFallback {
     this.subtitle = '',
     this.cover = '',
     this.tags = const [],
+    this.author = '',
+    this.uploader = '',
+    this.description = '',
     this.chapters = const [],
     this.cachedFlags = const [],
   });
@@ -178,6 +190,9 @@ class NasComicFallback {
         subtitle: m['subtitle']?.toString() ?? '',
         cover: m['cover']?.toString() ?? '',
         tags: tagsRaw,
+        author: m['author']?.toString() ?? '',
+        uploader: m['uploader']?.toString() ?? '',
+        description: m['description']?.toString() ?? '',
         chapters: chs,
         cachedFlags: flags,
       );
@@ -203,6 +218,9 @@ class NasComicFallback {
       subtitle: m['subtitle']?.toString() ?? '',
       cover: m['cover']?.toString() ?? '',
       tags: _tagsOf(m),
+      author: m['author']?.toString() ?? '',
+      uploader: m['uploader']?.toString() ?? '',
+      description: m['description']?.toString() ?? '',
       chapters: chs,
       cachedFlags: flags,
     );
@@ -251,14 +269,21 @@ Map<String, dynamic> nasFallbackToComicDetailsJson(
     // 章节标题可能为空（源没给），用 id 兜底，避免列表里出现空行
     chapters[c.id] = c.title.isEmpty ? c.id : c.title;
   }
+  // ComicDetails 没有 author 字段（作者一直是以 tags 里的
+  // "Author:xxx" 形式展示的），所以这里把手里的作者补进标签组，
+  // 保证离线页与在线页的展示位置一致。
+  final tags = _groupTags(fb.tags);
+  final author = fb.author.isEmpty ? _authorFromTags(fb.tags) : fb.author;
+  if (author != null && author.isNotEmpty && !tags.containsKey('Author')) {
+    tags['Author'] = [author];
+  }
+
   return {
     'title': fb.title.isEmpty ? fb.comicId : fb.title,
     'subtitle': fb.subtitle,
     'cover': fb.cover,
-    'description': null,
-    'tags': <String, List<String>>{
-      if (fb.tags.isNotEmpty) 'Tag': fb.tags,
-    },
+    'description': fb.description.isEmpty ? null : fb.description,
+    'tags': tags,
     'chapters': chapters,
     'thumbnails': null,
     'recommend': null,
@@ -269,11 +294,59 @@ Map<String, dynamic> nasFallbackToComicDetailsJson(
     'isLiked': null,
     'likesCount': null,
     'commentCount': null,
-    'uploader': null,
+    'uploader': fb.uploader.isEmpty ? null : fb.uploader,
     'uploadTime': null,
     'updateTime': null,
     'url': null,
   };
+}
+
+/// 从 `Author:xxx` / `作者:xxx` 形式的标签里取作者名。
+String? _authorFromTags(List<String> tags) {
+  for (final t in tags) {
+    final i = t.indexOf(':');
+    if (i <= 0) continue;
+    final ns = t.substring(0, i).trim().toLowerCase();
+    if (ns == 'author' || ns == 'artist' || ns == '作者' || ns == '作者名') {
+      final v = t.substring(i + 1).trim();
+      if (v.isNotEmpty) return v;
+    }
+  }
+  return null;
+}
+
+/// 把缓存的平铺标签还原成源站的命名空间分组。
+///
+/// 服务端存的是源站 tags 的**平铺形态**（`Categories:長篇`、
+/// `Tags:蘿莉`、`Chinese Team:xxx`…），因为它按 `ns:value` 存储。
+/// 早期实现把它们整体塞进一个叫 `Tag` 的分组，于是兜底详情页显示成
+/// 一长串「Tag: Categories:長篇 / Tags:蘿莉」，与源站的
+/// 「作者 / 汉化组 / 分类 / 标签」分组完全对不上——用户实测
+/// 《真夜中の夜子さん》就是这个现象。
+///
+/// 这里按第一个冒号切回 `{ns: [values]}`，与 ComicDetails 的
+/// tags 结构（Map<String, List<String>>）一致，UI 自然就分组了。
+/// 没有冒号的标签归到 `Tag` 兜底组，不丢数据。
+Map<String, List<String>> _groupTags(List<String> raw) {
+  final grouped = <String, List<String>>{};
+  for (final t in raw) {
+    final s = t.trim();
+    if (s.isEmpty) continue;
+    final i = s.indexOf(':');
+    if (i <= 0 || i == s.length - 1) {
+      // 无命名空间：放进通用组
+      grouped.putIfAbsent('Tag', () => <String>[]).add(s);
+      continue;
+    }
+    final ns = s.substring(0, i).trim();
+    final value = s.substring(i + 1).trim();
+    if (ns.isEmpty || value.isEmpty) {
+      grouped.putIfAbsent('Tag', () => <String>[]).add(s);
+      continue;
+    }
+    grouped.putIfAbsent(ns, () => <String>[]).add(value);
+  }
+  return grouped;
 }
 
 /// NAS 客户端：封装 W2 同步协议与缓存查询。
