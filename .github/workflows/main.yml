@@ -498,12 +498,12 @@ jobs:
 
           | 平台 | 文件 |
           |---|---|
-          | Android | \`venera-*-arm64-v8a.apk\` / \`venera-*-armeabi-v7a.apk\` / \`venera-*-x86_64.apk\` / \`venera-*-universal.apk\` |
-          | Windows | \`Venera-*-windows.zip\` / 安装包 \`.exe\` |
-          | macOS | \`venera-*-macos.dmg\`（未签名，首次打开需右键 → 打开） |
-          | iOS | \`venera-*-ios-unsigned.ipa\`（未签名，需自签重签后侧载） |
-          | Linux x64 | \`.deb\` / Arch \`.zst\` |
-          | Linux arm64 | \`.deb\` |
+          | Android | \`venera-<ver>-arm64-v8a.apk\` / \`venera-<ver>-armeabi-v7a.apk\` / \`venera-<ver>-x86_64.apk\` / \`venera-<ver>.apk\`（通用包，无后缀） |
+          | Windows | \`Venera-<ver>-windows.zip\` / \`Venera-<ver>-windows-installer.exe\` |
+          | macOS | \`venera-<ver>-macos.dmg\`（未签名，首次打开需右键 → 打开） |
+          | iOS | \`venera-<ver>-ios-unsigned.ipa\`（未签名，需自签重签后侧载） |
+          | Linux x64 | \`venera_<ver>_amd64.deb\` / \`venera-<ver>-163-x86_64.pkg.tar.zst\` |
+          | Linux arm64 | \`venera_<ver>_arm64.deb\` |
 
           ## NAS 服务端（容器镜像）
 
