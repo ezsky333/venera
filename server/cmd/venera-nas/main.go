@@ -100,13 +100,29 @@ func run(cfg config.Config, logger *slog.Logger, doImport bool, archive string) 
 	// ---- 同步引擎 ----
 	syncEngine := syncer.New(st)
 
+	// ---- 实时进度中心 ----
+	//
+	// 进度是高频变化数据（每张图都在变），写库太贵、读库太慢。
+	// Hub 把进度留在内存、由 SSE 每 200ms 合并推给面板；
+	// SQLite 只做 5 秒检查点。见 internal/jobs/live.go。
+	hub := jobs.NewHub()
+	defer hub.Close()
+
 	// ---- 下载器 ----
 	dl := jobs.NewDownloader(st, &runnerAdapter{srcMgr}, cfg.DownloadConcurrency)
+	dl.SetHub(hub)
 	dl.SetLogger(func(format string, args ...any) {
 		logger.Info("download", "msg", fmt.Sprintf(format, args...))
 	})
+	// 图片抓取的代理配置：注册进程级读取器，抓取时按需构造 client。
+	jshost.SetProxyProvider(func() jshost.ProxyConfig {
+		return jshost.ProxyConfig{Raw: cfg.Proxy, Bypass: cfg.ProxyBypass}
+	})
 	dl.SetFetch(func(url string, headers map[string]string) ([]byte, error) {
-		return jshost.FetchImageWithProxy(jshost.DefaultClientWithProxy(jshost.ProxyConfig{Raw: cfg.Proxy, Bypass: cfg.ProxyBypass}), url, headers)
+		// 图片下载专用：跟随重定向（图床 301 跳 CDN 是常态，跨 host
+		// 重定向被拦曾导致 picacg 封面全数下载失败），代理配置由
+		// SetProxyProvider 注册的进程级读取器提供。
+		return jshost.FetchImageWithProxy(nil, url, headers)
 	})
 	dl.SetTransform(func(initJS string, cfg *jobs.ImageConfig, data []byte) ([]byte, error) {
 		if initJS == "" {
@@ -140,10 +156,17 @@ func run(cfg config.Config, logger *slog.Logger, doImport bool, archive string) 
 	if cfg.AutoDownloadFavorites {
 		syncEngine.OnNewFavorites = func(items []model.Favorite) error {
 			for _, f := range items {
-				if _, err := worker.Enqueue(f.Source, f.ID, f.Title, "favorite-sync", nil); err != nil &&
-					!errors.Is(err, jobs.ErrAlreadyQueued) {
-					logger.Warn("enqueue favorite failed", "source", f.Source, "id", f.ID, "err", err)
+				_, err := worker.Enqueue(f.Source, f.ID, f.Title, "favorite-sync", nil)
+				if err == nil {
+					continue
 				}
+				// 已在队列 / 已缓存都是正常情况：客户端每次启动都会
+				// 全量重推收藏，这里必须安静跳过，不能刷警告。
+				if errors.Is(err, jobs.ErrAlreadyQueued) ||
+					errors.Is(err, jobs.ErrAlreadyCached) {
+					continue
+				}
+				logger.Warn("enqueue favorite failed", "source", f.Source, "id", f.ID, "err", err)
 			}
 			return nil
 		}
@@ -204,6 +227,7 @@ func run(cfg config.Config, logger *slog.Logger, doImport bool, archive string) 
 		Source: srcMgr,
 		Worker: worker,
 		DL:     dl,
+		Hub:    hub,
 		Logger: logger,
 	})
 
@@ -231,7 +255,16 @@ func run(cfg config.Config, logger *slog.Logger, doImport bool, archive string) 
 
 	errCh := make(chan error, 1)
 	go func() {
-		logger.Info("listening", "addr", cfg.Listen, "version", version)
+		// 代理是排查"某些源一直 dial tcp i/o timeout"的第一手信息：
+		// 没配代理时 ehentai/picacg 这类站点在国内网络下会直接超时，
+		// 而错误信息只写 "dial tcp ..."，看不出到底有没有走代理。
+		proxyDesc := cfg.Proxy
+		if proxyDesc == "" || strings.EqualFold(proxyDesc, "none") ||
+			strings.EqualFold(proxyDesc, "direct") {
+			proxyDesc = "(direct)"
+		}
+		logger.Info("listening", "addr", cfg.Listen, "version", version,
+			"proxy", proxyDesc)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
