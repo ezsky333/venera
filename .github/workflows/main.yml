@@ -277,12 +277,40 @@ jobs:
           architecture: x64
           cache: true
 
+      # Windows 上的坑与 Linux/macOS 不同。
+      #
+      # rust-toolchain.toml 声明 channel = "1.85.1"（那是给 Android
+      # 交叉编译定的，需要 aarch64/armv7/x86_64-linux-android 三个 target）。
+      # 但 rhttp 的 cargokit 在 Windows 上由 MSBuild 调用，而
+      # cargokit/build_tool/lib/src/builder.dart:138 把 toolchain 名字
+      # **硬编码**成 'stable'，build_tool 只能用 stable/beta/nightly 三选一，
+      # 无法表达 1.85.1 这种具体版本。于是报：
+      #
+      #   error : toolchain 'stable-x86_64-pc-windows-gnu' is not installed
+      #   error MSB8066: Custom build for 'rhttp_cargokit.vcxproj' exited with code -1
+      #
+      # 解决：Windows 上不需要 Android 的那套 target，直接把
+      # rust-toolchain.toml 移开，让 rustup 用默认 stable；
+      # cargokit 自己会 `rustup install stable` 并 add 对应的 msvc target。
+      #
+      # 注意 Rust 的 host triple 是 x86_64-pc-windows-msvc（不是 gnu），
+      # 显式安装 msvc target 才能和 MSBuild 产物链接。
       - name: Set up Rust
         shell: bash
         run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain none
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          export PATH="$HOME/.cargo/bin:$PATH"
+
+          # cargokit 要 stable，而 rust-toolchain.toml 会把默认覆盖成 1.85.1
+          mv rust-toolchain.toml rust-toolchain.toml.android-only
+
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustup target add x86_64-pc-windows-msvc
           rustup show
+          rustup run stable rustc --version
 
       # windows/build.py 会 flutter build windows 再打 zip + 用
       # Inno Setup 生成安装包，产物落在 build/windows/Venera-*
