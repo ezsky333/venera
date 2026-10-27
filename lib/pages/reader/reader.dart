@@ -148,9 +148,49 @@ class _ReaderState extends State<Reader>
       if (!mounted) return;
       // 停留够了且还停在同一页 → 允许播动画
       if (this.page != page) return;
-      animatePage = page;
-      update();
+      _switchToAnimated(page);
     });
+  }
+
+  /// 切换到"可播放动画"的 provider，且**不产生黑屏**。
+  ///
+  /// 关键点：allowAnimation 是 provider key 的一部分（必须如此，
+  /// 否则 imageCache 会复用静态条目，动画永远不播）。但 key 一变，
+  /// 就意味着要重新解码一张 10MB 的图；PhotoView 又没有
+  /// gaplessPlayback，解码期间画面就是黑的——这就是用户看到的
+  /// "切入画面后闪一下黑屏"。
+  ///
+  /// 解法：先把带 allowAnimation=true 的 provider **预热进 imageCache**，
+  /// 等它解码完再切 animatePage。这样切过去的瞬间缓存里已有图，
+  /// 直接命中，不会闪。
+  Future<void> _switchToAnimated(int page) async {
+    if (animatePage == page) return;
+
+    final images = this.images;
+    if (images != null && page >= 1 && page <= images.length) {
+      final imageKey = images[page - 1];
+      final provider = ReaderImageProvider(
+        imageKey,
+        type.comicSource?.key,
+        cid,
+        eid,
+        page,
+        enableResize: mode.isContinuous,
+        allowAnimation: true,
+      );
+      try {
+        await precacheImage(provider, context);
+      } catch (_) {
+        // 预热失败不影响功能：退化成切过去时闪一下，
+        // 总比因为一张图坏了就永远不播动画好。
+      }
+      if (!mounted) return;
+      // 预热期间用户可能又翻页了
+      if (this.page != page) return;
+    }
+
+    animatePage = page;
+    update();
   }
 
   /// The maximum page number for images only (excluding chapter comments page).
@@ -684,11 +724,14 @@ abstract mixin class _ReaderLocation {
       return;
     }
     if (this.page != page) {
+      // 先落 page 再通知：onPageSettling 的定时器里用
+      // `this.page != page` 判断"是否还停在同一页"，
+      // 顺序反了会导致条件恒成立、动画永远不被允许。
+      this.page = page;
       // 换页即视为"还没停稳"：停掉动画、回到首帧，让新页第一帧尽快出来。
       // 具体调度交给 _ReaderState（mixin 里拿不到 mounted/context）。
       onPageSettling(page);
     }
-    this.page = page;
   }
 
   /// 页码变化时的"停稳检测"钩子，由 _ReaderState 实现。
@@ -722,6 +765,10 @@ abstract mixin class _ReaderLocation {
       if (hasAnimation) {
         _pendingPage = page;
         _animationCount++;
+        // 注意顺序：先落 page 再通知，否则 onPageSettling 的定时器
+        // 里 `this.page != page` 恒成立，动画永远不会被允许。
+        this.page = page;
+        onPageSettling(page);
         update();
         _imageViewController!.animateToPage(page).then((_) {
           _animationCount--;
@@ -732,6 +779,7 @@ abstract mixin class _ReaderLocation {
         });
       } else {
         this.page = page;
+        onPageSettling(page);
         update();
         _imageViewController!.toPage(page);
       }

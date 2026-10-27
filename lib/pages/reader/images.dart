@@ -305,9 +305,17 @@ class _GalleryModeState extends State<_GalleryMode>
     reader._imageViewController = this;
     Future.microtask(() {
       context.readerScaffold.setFloatingButton(0);
+      // 首屏也要预加载相邻页（builder 里已经不再触发预加载）
+      cache(reader.page);
     });
     super.initState();
   }
+
+  /// 已触发过预加载的页码，避免重复解码。
+  ///
+  /// 与连续模式的 `cached[]` 同义：没有它的话，来回翻同一页会反复
+  /// precacheImage，在 10MB/页 的漫画上代价很明显。
+  final Set<int> _cachedPages = {};
 
   /// Get the range of images for the given page. [page] is 1-based.
   (int start, int end) getPageImagesRange(int page) {
@@ -357,6 +365,7 @@ class _GalleryModeState extends State<_GalleryMode>
 
   void _cachePage(int page, bool shouldPreCache) {
     if (isChapterCommentsPage(page)) return;
+    if (!_cachedPages.add(page)) return; // 已经预加载过
     var (startIndex, endIndex) = getPageImagesRange(page);
     for (int i = startIndex; i < endIndex; i++) {
       shouldPreCache
@@ -423,7 +432,14 @@ class _GalleryModeState extends State<_GalleryMode>
               endIndex,
             );
 
-            cache(index);
+            // 注意：这里**不能**调 cache(index)。
+            //
+            // builder 在滑动动画的每一帧都会被调用（PhotoViewGallery 会
+            // 为当前页 ±1 反复 build），把预加载放在这里等于每帧都触发
+            // 一轮 precacheImage/preDownloadImage。一本 10MB/页 的漫画
+            // 滑动时就是持续的解码风暴，表现为"滑动一直卡"。
+            //
+            // 预加载已改到 onPageChanged 里，每次翻页只做一次。
 
             photoViewControllers[index] ??= PhotoViewController();
 
@@ -489,6 +505,9 @@ class _GalleryModeState extends State<_GalleryMode>
           } else {
             reader.setPage(i);
             context.readerScaffold.update();
+            // 预加载相邻页。放在这里而不是 builder 里：
+            // 每次翻页只跑一次，而不是滑动动画的每一帧都跑。
+            cache(i);
             // Auto close toolbar when entering chapter comments page
             if (isChapterCommentsPage(i) && context.readerScaffold.isOpen) {
               context.readerScaffold.openOrClose();
