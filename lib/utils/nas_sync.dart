@@ -448,6 +448,13 @@ class NasSync with ChangeNotifier {
         pushed += await _bootstrapPush();
       } else {
         pulled += await _pullIncremental(onRemoteChanges: notifyRemoteChanges);
+        // 增量路径也要补源登录态。
+        //
+        // 游标存在时走的是 _pullIncremental，它只按 op 重放，而
+        // source.data / source.cookie 的 op 早就在游标之前了——
+        // 新装的源、或本地 data 被清掉的设备永远补不上。
+        // 实际症状就是"新设备上 picacg 一直未登录"。
+        pulled += await _pullSourceCredentials();
       }
       _lastSyncAt = DateTime.now();
     } catch (e) {
@@ -660,6 +667,68 @@ class NasSync with ChangeNotifier {
       await client.updateCursor(cursor);
       if (data['hasMore'] != true) break;
     }
+    return applied;
+  }
+
+  /// 拉取并应用各源的登录态（配置 + Cookie）。
+  ///
+  /// 与 [_pullSnapshot] 里的同名逻辑共用 NasSourceSync 的合并函数，
+  /// 区别只是数据来源：这里走轻量端点，不连带 500 条历史。
+  ///
+  /// 返回实际改动的源/条目数（0 表示本地已经齐了，不算"有更新"）。
+  Future<int> _pullSourceCredentials() async {
+    final client = NasClient.instance;
+    var dio = _dio(client);
+    if (dio == null) return 0;
+
+    var res = await dio.get('/api/v1/sync/source-credentials');
+    if (res.statusCode != 200 || res.data is! Map) {
+      // 老服务端没有这个端点（404）：静默跳过，不影响其它同步。
+      return 0;
+    }
+    var body = Map<String, dynamic>.from(res.data);
+
+    var applied = 0;
+
+    try {
+      final rawData = body['data'];
+      if (rawData is Map && rawData.isNotEmpty) {
+        final remote = <String, Map<String, dynamic>>{};
+        rawData.forEach((k, v) {
+          if (v is Map) remote[k.toString()] = Map<String, dynamic>.from(v);
+        });
+        final n = await NasSourceSync.applySourceData(remote);
+        if (n > 0) {
+          Log.info('NAS Sync', 'incremental: applied source data for $n');
+          applied += n;
+        }
+      }
+    } catch (e) {
+      Log.error('NAS Sync', 'incremental: apply source data failed: $e');
+    }
+
+    try {
+      final rawCookies = body['cookies'];
+      if (rawCookies is Map && rawCookies.isNotEmpty) {
+        final remote = <String, List<Map<String, dynamic>>>{};
+        rawCookies.forEach((k, v) {
+          if (v is List) {
+            remote[k.toString()] = v
+                .whereType<Map>()
+                .map((e) => Map<String, dynamic>.from(e))
+                .toList();
+          }
+        });
+        final n = await NasSourceSync.applyCookies(remote);
+        if (n > 0) {
+          Log.info('NAS Sync', 'incremental: applied $n cookies');
+          applied += n;
+        }
+      }
+    } catch (e) {
+      Log.error('NAS Sync', 'incremental: apply cookies failed: $e');
+    }
+
     return applied;
   }
 
