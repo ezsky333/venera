@@ -46,6 +46,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 版本号由 tag 决定，不是 pubspec 里那个手写的数字。
+      # 详见 .github/actions/derive-version/action.yml 的说明。
+      - id: ver
+        uses: ./.github/actions/derive-version
+
       # 清掉预置 toolcache：里面是镜像烘焙时固定的 Flutter，
       # 会和 flutter-action 按 pubspec 装的版本打架。
       - name: Clean hosted toolcache
@@ -127,7 +132,7 @@ jobs:
 
       # splits 已开（abi + universalApk）：产出 3 个 ABI 包 + 1 个通用包
       - name: Build release APK
-        run: flutter build apk --release
+        run: flutter build apk --release --dart-define=APP_VERSION=${{ steps.ver.outputs.version }}
 
       - name: Collect artifacts
         run: |
@@ -166,6 +171,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - id: ver
+        uses: ./.github/actions/derive-version
+
       # 不导入证书：fork 没有 secrets.CERTIFICATE。
       # flutter build macos 默认会做 ad-hoc 签名（codesign -s -），
       # 产出的 app 在本机与"右键打开"场景可直接用。
@@ -188,7 +196,7 @@ jobs:
       - run: flutter pub get
 
       - name: Build macOS app
-        run: flutter build macos --release
+        run: flutter build macos --release --dart-define=APP_VERSION=${{ steps.ver.outputs.version }}
 
       - name: Package DMG
         run: |
@@ -216,6 +224,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - id: ver
+        uses: ./.github/actions/derive-version
+
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
@@ -237,7 +248,7 @@ jobs:
       # 未签名 ipa：只能用于自签重签/侧载，不能直接上架。
       # 保留这一步是因为"能拿到 ipa"本身对自用有价值。
       - name: Build iOS (no codesign)
-        run: flutter build ios --release --no-codesign
+        run: flutter build ios --release --no-codesign --dart-define=APP_VERSION=${{ steps.ver.outputs.version }}
 
       - name: Package IPA
         run: |
@@ -278,6 +289,9 @@ jobs:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
+
+      - id: ver
+        uses: ./.github/actions/derive-version
 
       - name: Install dependencies
         run: |
@@ -353,6 +367,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - id: ver
+        uses: ./.github/actions/derive-version
+
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
@@ -408,6 +425,9 @@ jobs:
     runs-on: ubuntu-22.04-arm
     steps:
       - uses: actions/checkout@v4
+
+      - id: ver
+        uses: ./.github/actions/derive-version
 
       - uses: subosito/flutter-action@v2
         with:
@@ -471,6 +491,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Release 标题与产物文件名都用 tag 推导的版本号。
+      # 不跑这一步的话这里读到的是 pubspec 里手写的旧值，
+      # 于是 v1.6.6 的 Release 标题会写成 1.6.3。
+      - id: ver
+        uses: ./.github/actions/derive-version
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -485,9 +511,12 @@ jobs:
       - name: Read version
         id: v
         run: |
-          VERSION="$(grep -m1 '^version:' pubspec.yaml | cut -d':' -f2 | tr -d ' ')"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "semver=${VERSION%%+*}" >> "$GITHUB_OUTPUT"
+          # 直接用 derive-version 的输出，不再从 pubspec 里 grep。
+          # 这里是 Release 标题与正文的唯一来源，读错会让整页说明
+          # 与实际产物对不上（v1.6.6 出现过标题写 1.6.3）。
+          SEMVER="${{ steps.ver.outputs.version }}"
+          echo "semver=$SEMVER" >> "$GITHUB_OUTPUT"
+          echo "version=$SEMVER+${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
 
       - name: Write release notes
         run: |
@@ -530,7 +559,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref_name }}
-          name: ${{ steps.v.outputs.version }}
+          name: ${{ steps.v.outputs.semver }}
           body_path: notes.md
           # glob 不匹配时 softprops 会直接失败，这里逐类列出并用
           # 单条 files 输入；缺失的类型不会中断（v2 对未匹配 glob 宽松）

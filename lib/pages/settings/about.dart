@@ -69,7 +69,9 @@ class _AboutSettingsState extends State<AboutSettings> {
           title: const Text("Github"),
           trailing: const Icon(Icons.open_in_new),
           onTap: () {
-            launchUrlString("https://github.com/venera-app/venera");
+            // 指向本 fork：这里的版本才带 NAS 那套改动，
+            // 把用户送去上游仓库等于引导他装回原版。
+            launchUrlString("https://github.com/$updateRepo");
           },
         ).toSliver(),
         ListTile(
@@ -84,65 +86,57 @@ class _AboutSettingsState extends State<AboutSettings> {
   }
 }
 
-Future<bool> checkUpdate() async {
-  var res = await AppDio()
-      .get("https://cdn.jsdelivr.net/gh/venera-app/venera@master/pubspec.yaml");
-  if (res.statusCode == 200) {
-    var data = loadYaml(res.data);
-    if (data["version"] != null) {
-      return _compareVersion(data["version"].split("+")[0], App.version);
-    }
-  }
-  return false;
-}
-
 Future<void> checkUpdateUi([bool showMessageIfNoUpdate = true, bool delay = false]) async {
   try {
-    var value = await checkUpdate();
-    if (value) {
-      if (delay) {
-        await Future.delayed(const Duration(seconds: 2));
+    final info = await fetchLatestRelease();
+    if (info == null) {
+      // 查不到 ≠ 没有新版。原来这两种情况都走"没有新版本可用"，
+      // 用户在网络不好时会得到一句确定的假话。这里如实说查不到。
+      if (showMessageIfNoUpdate) {
+        App.rootContext.showMessage(message: "Failed to check for updates".tl);
       }
-      showDialog(
-          context: App.rootContext,
-          builder: (context) {
-            return ContentDialog(
-              title: "New version available".tl,
-              content: Text(
-                      "A new version is available. Do you want to update now?"
-                          .tl)
-                  .paddingHorizontal(16),
-              actions: [
-                Button.text(
-                  onPressed: () {
-                    Navigator.pop(context);
-                    launchUrlString(
-                        "https://github.com/venera-app/venera/releases");
-                  },
-                  child: Text("Update".tl),
+      return;
+    }
+    if (!isNewerVersion(info.version, App.version)) {
+      if (showMessageIfNoUpdate) {
+        App.rootContext.showMessage(message: "No new version available".tl);
+      }
+      return;
+    }
+    if (delay) {
+      await Future.delayed(const Duration(seconds: 2));
+    }
+    showDialog(
+        context: App.rootContext,
+        builder: (context) {
+          return ContentDialog(
+            title: "New version available".tl,
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  "A new version is available. Do you want to update now?".tl,
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  "${App.version} → ${info.version}",
+                  style: const TextStyle(fontSize: 12),
                 ),
               ],
-            );
-          });
-    } else if (showMessageIfNoUpdate) {
-      App.rootContext.showMessage(message: "No new version available".tl);
-    }
+            ).paddingHorizontal(16),
+            actions: [
+              Button.text(
+                onPressed: () {
+                  Navigator.pop(context);
+                  launchUrlString(info.url);
+                },
+                child: Text("Update".tl),
+              ),
+            ],
+          );
+        });
   } catch (e, s) {
     Log.error("Check Update", e.toString(), s);
   }
-}
-
-/// return true if version1 > version2
-bool _compareVersion(String version1, String version2) {
-  var v1 = version1.split(".");
-  var v2 = version2.split(".");
-  for (var i = 0; i < v1.length; i++) {
-    if (int.parse(v1[i]) > int.parse(v2[i])) {
-      return true;
-    }
-    if (int.parse(v1[i]) < int.parse(v2[i])) {
-      return false;
-    }
-  }
-  return false;
 }

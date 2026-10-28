@@ -1,4 +1,4 @@
-﻿import 'dart:async';
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -15,15 +15,14 @@ import 'package:venera/foundation/js_engine.dart';
 import 'package:venera/foundation/local.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/nas_client.dart';
-import 'package:venera/network/app_dio.dart';
 import 'package:venera/pages/nas_download_manager.dart';
+import 'package:venera/utils/app_update.dart';
 import 'package:venera/utils/data.dart';
 import 'package:venera/utils/data_sync.dart';
 import 'package:venera/utils/io.dart';
 import 'package:venera/utils/nas_sync.dart';
 import 'package:venera/utils/nas_source_sync.dart';
 import 'package:venera/utils/translations.dart';
-import 'package:yaml/yaml.dart';
 
 part 'reader.dart';
 part 'explore_settings.dart';
