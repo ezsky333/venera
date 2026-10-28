@@ -376,22 +376,39 @@ class _ReaderState extends State<Reader>
   @override
   Widget build(BuildContext context) {
     _checkImagesPerPageChange();
-    return KeyboardListener(
-      focusNode: focusNode,
-      autofocus: true,
-      onKeyEvent: onKeyEvent,
-      child: Overlay(
-        initialEntries: [
-          OverlayEntry(
-            builder: (context) {
-              return _ReaderScaffold(
-                child: _ReaderGestureDetector(
-                  child: _ReaderImages(key: Key(chapter.toString())),
-                ),
-              );
-            },
-          ),
-        ],
+    // 返回键由阅读器自己接管，只弹自己这一层。
+    //
+    // 之前这里是裸的，返回完全交给框架处理。阅读器压在根 Navigator 上、
+    // 详情页压在内层 Navigator 上，两层各自都"可以 pop"；Android 13+
+    // 的预测式返回会把同一次返回同时触发给根路由和下层 PopScope 的转发，
+    // 于是阅读器弹掉之后，详情页跟着又被弹了一次——用户看到的就是
+    // "从阅读器返回，没回到详情页，直接往上退了一级"。
+    //
+    // canPop: false 把这次 pop 变成"框架不自己动手，由我们显式做一次"，
+    // 保证一次返回只弹一层。
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
+        Navigator.of(context).pop();
+      },
+      child: KeyboardListener(
+        focusNode: focusNode,
+        autofocus: true,
+        onKeyEvent: onKeyEvent,
+        child: Overlay(
+          initialEntries: [
+            OverlayEntry(
+              builder: (context) {
+                return _ReaderScaffold(
+                  child: _ReaderGestureDetector(
+                    child: _ReaderImages(key: Key(chapter.toString())),
+                  ),
+                );
+              },
+            ),
+          ],
+        ),
       ),
     );
   }

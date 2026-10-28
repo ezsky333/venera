@@ -232,6 +232,19 @@ class NaviPaneState extends State<NaviPane>
           if (didPop) {
             return;
           }
+          // 根 Navigator 上还压着别的页面（阅读器、弹层页）时，这一次返回
+          // 属于那一层，本层不能转发。
+          //
+          // 不判断的话会出现"从阅读器返回，详情页跟着一起被弹掉"：
+          // 阅读器在根 Navigator 上，按一次返回本该只弹它；但本层拿到的
+          // 是同一个返回事件，于是又往内层 Navigator 里 maybePop 了一次，
+          // 内层的详情页就被顺手弹掉，用户看到的就是"直接往上退了一级"。
+          // isCurrent 在这里是准确的判据——MainPage 是根 Navigator 的首个
+          // 路由，只有在没有页面压在它上面时它才是 current。
+          final hostRoute = ModalRoute.of(context);
+          if (hostRoute != null && !hostRoute.isCurrent) {
+            return;
+          }
           widget.navigatorKey.currentState?.maybePop(result);
         },
         child: NotificationListener<NavigationNotification>(
