@@ -2,13 +2,11 @@ name: venera
 description: "A comic app."
 publish_to: 'none'
 
-# 版本号说明：
-#   发版以 git tag 为准（v1.6.6），CI 会把这里改写成 tag 对应的值再构建
-#   （见 .github/actions/derive-version）。本地构建沿用这个数字即可。
-#   App 内报的版本来自 --dart-define=APP_VERSION，与这里保持一致只是为了
-#   让 `flutter build` 产出的文件名不误导；两者对不上会让"检查更新"
-#   误报有新版本。
-version: 1.6.3+163
+# 版本号：App 内报的版本（lib/foundation/app.dart 的 App.version）与这里是
+# 同一份数字的两个人肉维护处，改一个要同时改另一个。
+# 更新检测读的正是本仓库分支上这个文件的 version，再与 App.version 比对；
+# 两边对不上就会出现"装到最新版还一直提示有新版本、下载到的还是同一个包"。
+version: 1.6.5+165
 
 environment:
   # Dart SDK 下限保持宽松（3.8），实际由下面的 flutter 约束决定。

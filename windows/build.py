@@ -30,17 +30,7 @@ def write_text(path, text):
 
 content = read_text('pubspec.yaml')
 
-# App.version 由构建注入，取 CI 从 tag 推导的值（见
-# .github/actions/derive-version）。没有就退回 pubspec 里的版本，
-# 保证本地直接跑这个脚本也能出可用的包。
-app_version = os.environ.get('APP_VERSION', '').strip()
-if not app_version:
-    app_version = content.split('version: ')[1].split('\n')[0].split('+')[0].strip()
-print(f"APP_VERSION = {app_version}")
-
-subprocess.run(
-    ["flutter", "build", "windows", f"--dart-define=APP_VERSION={app_version}"],
-    shell=True, check=True)
+subprocess.run(["flutter", "build", "windows"], shell=True, check=True)
 
 if os.path.exists("build/app-windows.zip"):
     os.remove("build/app-windows.zip")

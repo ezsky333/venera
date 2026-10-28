@@ -10,8 +10,9 @@ void main() {
     });
 
     test('相同版本不算更新', () {
-      // 这条是关键：发布 tag 与 App 报的版本号对齐之后，
+      // 关键一条：检测读的 pubspec 与 App.version 对齐之后，
       // 装到最新版的人不该再被提示"有新版本"。
+      expect(isNewerVersion('1.6.5', '1.6.5'), isFalse);
       expect(isNewerVersion('1.6.6', '1.6.6'), isFalse);
     });
 

@@ -11,7 +11,6 @@ pubspec.yaml 现在也有中文注释。Linux runner 默认 UTF-8 侥幸能过�
 """
 import subprocess
 import sys
-import os
 
 UTF8 = dict(encoding='utf-8')
 
@@ -51,13 +50,7 @@ write_text('debian/gui/venera.desktop',
            desktop_content.replace('{{Version}}', version))
 
 try:
-    # App.version 由构建注入，取 CI 从 tag 推导的值（见
-    # .github/actions/derive-version）。没有就退回 pubspec，本地也能跑。
-    app_version = os.environ.get('APP_VERSION', '').strip() or version
-    print(f"APP_VERSION = {app_version}")
-    subprocess.run(
-        ["flutter", "build", "linux", f"--dart-define=APP_VERSION={app_version}"],
-        check=True)
+    subprocess.run(["flutter", "build", "linux"], check=True)
     subprocess.run(["$HOME/.pub-cache/bin/flutter_to_debian"],
                    shell=True, check=True)
 finally:

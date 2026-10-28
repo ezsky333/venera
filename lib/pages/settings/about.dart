@@ -86,11 +86,12 @@ class _AboutSettingsState extends State<AboutSettings> {
   }
 }
 
-Future<void> checkUpdateUi([bool showMessageIfNoUpdate = true, bool delay = false]) async {
+Future<void> checkUpdateUi(
+    [bool showMessageIfNoUpdate = true, bool delay = false]) async {
   try {
-    final info = await fetchLatestRelease();
+    final info = await fetchLatestVersion();
     if (info == null) {
-      // 查不到 ≠ 没有新版。原来这两种情况都走"没有新版本可用"，
+      // 查不到不等于没有新版。原来这两种情况都走"没有新版本可用"，
       // 用户在网络不好时会得到一句确定的假话。这里如实说查不到。
       if (showMessageIfNoUpdate) {
         App.rootContext.showMessage(message: "Failed to check for updates".tl);
@@ -120,7 +121,8 @@ Future<void> checkUpdateUi([bool showMessageIfNoUpdate = true, bool delay = fals
                 ),
                 const SizedBox(height: 8),
                 Text(
-                  "${App.version} → ${info.version}",
+                  // 让用户看得见差在哪，而不是只说"有新版本"
+                  "V${App.version} -> V${info.version}",
                   style: const TextStyle(fontSize: 12),
                 ),
               ],

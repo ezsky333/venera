@@ -15,21 +15,10 @@ export "context.dart";
 class _App {
   /// 运行期版本号。
   ///
-  /// 优先取构建时注入的 `APP_VERSION`（CI 从 git tag 推导，见 main.yml 的
-  /// "Derive app version"）：本仓库的发布单位是 tag（v1.6.6），
-  /// 而 pubspec 里的 `version:` 是**手工维护**的另一份数字，两者经常对不上
-  /// ——v1.6.6 那次发布，pubspec 里写的还是 1.6.3。
-  ///
-  /// 这对更新检测是致命的：App 报 1.6.3、最新 tag 是 1.6.6，于是
-  /// **装到最新版的人也被提示"有新版本"**，点进去下载到的还是同一个包，
-  /// 下次打开继续提示。所以发版时让 tag 决定版本号，而不是让代码里
-  /// 的常量决定。
-  ///
-  /// 本地 debug 构建没有这个 define，回落到下面的默认值。
-  final version = const String.fromEnvironment(
-    'APP_VERSION',
-    defaultValue: "1.6.3",
-  );
+  /// **必须与 pubspec.yaml 的 `version:`（去掉 `+build`）保持一致。**
+  /// 更新检测读的是本仓库分支上的 pubspec，拿它和这里的值比；两边不一致
+  /// 就会出现"装到最新版还一直提示有新版本、点进去下载的还是同一个包"。
+  final version = "1.6.5";
 
   bool get isAndroid => Platform.isAndroid;
 

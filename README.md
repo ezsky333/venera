@@ -105,9 +105,7 @@ docker run -d --name venera-nas \
 2. `flutter build apk`（或对应平台）
 3. 服务端：`cd server && go build ./cmd/venera-nas`
 
-App 内报的版本号由构建时注入：`--dart-define=APP_VERSION=1.6.6`。CI 从 git tag 推出这个值（见 [.github/actions/derive-version](.github/actions/derive-version/action.yml)），本地不传就退回 pubspec 里的 `version:`。发版时请打 tag，pubspec 的版本号不用手动改——它和 tag 对不上会让"检查更新"一直报有新版本。
-
-更新检测走 GitHub Releases（拿不到时退到 jsDelivr 的 tag 索引），指向 [ezsky333/venera](https://github.com/ezsky333/venera)。换仓库不用改代码，构建时加 `--dart-define=UPDATE_REPO=owner/repo`。
+App 内报的版本号取自 [pubspec.yaml](pubspec.yaml) 的 `version:`，更新检测读的是**本仓库分支上同一个文件**——所以发版前把这里改对即可，不需要额外打 tag。换仓库不用改代码，构建时加 `--dart-define=UPDATE_REPO=owner/repo`（分支用 `UPDATE_BRANCH`）。
 
 ## 文档
 
