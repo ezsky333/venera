@@ -1,55 +1,64 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 440" width="980" height="440" font-family="PingFang SC, Hiragino Sans GB, Microsoft YaHei, Noto Sans CJK SC, Helvetica Neue, Arial, sans-serif">
-  <defs>
-    <marker id="o1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#1f883d"/>
-    </marker>
-    <marker id="o2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#9a6700"/>
-    </marker>
-  </defs>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 546" width="980" height="546" font-family="PingFang SC, Hiragino Sans GB, Microsoft YaHei, Noto Sans CJK SC, Helvetica Neue, Arial, sans-serif">
+  <rect width="980" height="546" fill="#ffffff"/>
 
-  <rect width="980" height="440" fill="#ffffff"/>
+  <text x="24" y="34" font-size="17" font-weight="700" fill="#1f2328">离线 NAS 模式：开和不开，差在哪里</text>
+  <text x="24" y="58" font-size="12.5" fill="#656d76">你不在意收藏有没有更新，只想尽快从 NAS 读已缓存的元数据和正文——那就打开它</text>
 
-  <text x="24" y="34" font-size="17" font-weight="700" fill="#1f2328">离线模式：资源从哪来</text>
-  <text x="24" y="56" font-size="12.5" fill="#656d76">开不开这个开关，决定的是"NAS 缓存之外的请求还发不发"</text>
+  <!-- 表头 -->
+  <rect x="24" y="80" width="932" height="36" rx="6" fill="#f6f8fa" stroke="#d0d7de"/>
+  <text x="40" y="103" font-size="11.5" font-weight="700" fill="#1f2328">资源</text>
+  <text x="248" y="103" font-size="11.5" font-weight="700" fill="#1f2328">关（默认）· 源站能用就正常走</text>
+  <text x="616" y="103" font-size="11.5" font-weight="700" fill="#7d4e00">开 · 一律先问 NAS</text>
 
-  <!-- 左：关 -->
-  <rect x="24" y="80" width="452" height="272" rx="12" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.5"/>
-  <text x="44" y="108" font-size="12.5" font-weight="700" fill="#1f2328">关（默认）· 正常在线使用</text>
+  <!-- 开列底色 -->
+  <rect x="600" y="116" width="356" height="320" fill="#fffdf5"/>
 
-  <g font-size="11.2" fill="#3d4451">
-    <text x="44" y="136">本地有缓存 → 读本地</text>
-    <text x="44" y="158">本地没有 → 看 NAS 有没有，有就直接读</text>
-    <text x="44" y="180">NAS 也没有 → 照常请求源站现取</text>
+  <!-- 行分隔与竖线 -->
+  <g stroke="#eaeef2" stroke-width="1">
+    <line x1="24" y1="180" x2="956" y2="180"/>
+    <line x1="24" y1="244" x2="956" y2="244"/>
+    <line x1="24" y1="308" x2="956" y2="308"/>
+    <line x1="24" y1="372" x2="956" y2="372"/>
+    <line x1="24" y1="436" x2="956" y2="436"/>
   </g>
-
-  <rect x="44" y="204" width="412" height="60" rx="8" fill="#ffffff" stroke="#d0d7de"/>
-  <text x="60" y="226" font-size="11" font-weight="700" fill="#1f2328">适合：家里、公司，网络顺畅的时候</text>
-  <text x="60" y="246" font-size="10.5" fill="#57606a">NAS 缓存先顶上，源站只兜最底，重复下载几乎不会发生</text>
-
-  <text x="44" y="292" font-size="10.5" fill="#8c959f">缓存命中顺序：本地 → NAS → 源站，每一级都能独立工作</text>
-
-  <!-- 右：开 -->
-  <rect x="500" y="80" width="456" height="272" rx="12" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.5"/>
-  <text x="520" y="108" font-size="12.5" font-weight="700" fill="#1f2328">开 · 离线 NAS 模式</text>
-
-  <g font-size="11.2" fill="#3d4451">
-    <text x="520" y="136">本地有缓存 → 读本地（不变）</text>
-    <text x="520" y="158">本地没有 → 看 NAS 有没有，有就直接读（不变）</text>
-    <text x="520" y="180">NAS 也没有 → 到此为止，不再去源站</text>
+  <g stroke="#e3e8ee" stroke-width="1">
+    <line x1="232" y1="116" x2="232" y2="436"/>
+    <line x1="600" y1="116" x2="600" y2="436"/>
   </g>
+  <rect x="24" y="80" width="932" height="356" rx="6" fill="none" stroke="#d0d7de"/>
 
-  <rect x="520" y="204" width="416" height="60" rx="8" fill="#fff8e6" stroke="#d4a72c" stroke-width="1.2"/>
-  <text x="536" y="226" font-size="11" font-weight="700" fill="#7d4e00">适合：外网访问家里 NAS 的时候</text>
-  <text x="536" y="246" font-size="10.5" fill="#6b5200">配合内网穿透（DDNS / frp / Tailscale 均可），体验与在家一致</text>
+  <!-- 封面 -->
+  <text x="40" y="154" font-size="11.2" font-weight="700" fill="#1f2328">封面</text>
+  <text x="248" y="154" font-size="10.8" fill="#3d4451">先请求源站，拿不到才用 NAS 那份</text>
+  <text x="616" y="154" font-size="10.8" fill="#4a3a00">先取 NAS 缓存，NAS 没有才回源站</text>
 
-  <text x="520" y="292" font-size="10.5" fill="#8c959f">封面、详情、缩略图同样只走 NAS，页面路径在 NAS 上闭环</text>
+  <!-- 详情页 -->
+  <text x="40" y="212" font-size="11.2" font-weight="700" fill="#1f2328">详情页</text>
+  <text x="40" y="230" font-size="9.8" fill="#8c959f">标题 / 作者 / 章节列表</text>
+  <text x="248" y="206" font-size="10.8" fill="#3d4451">先问源站（8 秒超时），失败了才</text>
+  <text x="248" y="224" font-size="10.8" fill="#3d4451">用 NAS 兜底</text>
+  <text x="616" y="206" font-size="10.8" fill="#4a3a00">先问 NAS（短超时），NAS 没有才</text>
+  <text x="616" y="224" font-size="10.8" fill="#4a3a00">回源站</text>
 
-  <!-- 中间箭头：开 -->
-  <text x="478" y="120" font-size="18" font-weight="700" fill="#9a6700" text-anchor="middle">→</text>
+  <!-- 阅读内页 -->
+  <text x="40" y="284" font-size="11.2" font-weight="700" fill="#1f2328">阅读内页</text>
+  <text x="248" y="289" font-size="10.8" fill="#3d4451">本地已下载 → NAS → 源站</text>
+  <text x="616" y="278" font-size="10.8" fill="#4a3a00">本地已下载 → NAS；NAS 没有就报错</text>
+  <text x="616" y="296" font-size="10.8" fill="#4a3a00">「这一章没缓存在 NAS 上」，不碰源站</text>
 
-  <!-- 底部 -->
-  <rect x="24" y="368" width="932" height="48" rx="10" fill="#eef4ff" stroke="#2f81f7" stroke-width="1.2"/>
-  <text x="44" y="388" font-size="11.5" font-weight="700" fill="#0a3069">怎么开：首页顶部「离线 NAS 模式」开关，点一下即生效</text>
-  <text x="44" y="406" font-size="11" fill="#3d4451">判定用的是开关状态本身，不依赖网络探测结果——探测是异步的，拿它当开关会有竞态。</text>
+  <!-- 缩略图 -->
+  <text x="40" y="346" font-size="11.2" font-weight="700" fill="#1f2328">缩略图</text>
+  <text x="248" y="346" font-size="10.8" fill="#3d4451">照常从源站加载</text>
+  <text x="616" y="346" font-size="10.8" fill="#4a3a00">不加载，详情页没有缩略图画廊</text>
+
+  <!-- 收藏状态 -->
+  <text x="40" y="410" font-size="11.2" font-weight="700" fill="#1f2328">收藏状态 / 收藏夹</text>
+  <text x="248" y="410" font-size="10.8" fill="#3d4451">照常问源站</text>
+  <text x="616" y="410" font-size="10.8" fill="#4a3a00">跳过，直接用 NAS 数据里的值</text>
+
+  <!-- 底部说明 -->
+  <rect x="24" y="456" width="932" height="70" rx="10" fill="#eef4ff" stroke="#2f81f7" stroke-width="1.2"/>
+  <text x="42" y="480" font-size="10.6" fill="#0a3069">开关是设备级设置，不参与多设备同步——它说的是「这台设备现在什么网络」，不是账号偏好。</text>
+  <text x="42" y="500" font-size="10.6" fill="#0a3069">打开时会先探一次 NAS，探不通就弹提示，不会静默打开一个什么都没变的开关。</text>
+  <text x="42" y="518" font-size="10.6" fill="#0a3069">关掉后行为完全回到原样，不留副作用。</text>
 </svg>
