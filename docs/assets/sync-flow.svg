@@ -1,90 +1,80 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 640" width="980" height="640" font-family="PingFang SC, Hiragino Sans GB, Microsoft YaHei, Noto Sans CJK SC, Helvetica Neue, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 620" width="980" height="620" font-family="PingFang SC, Hiragino Sans GB, Microsoft YaHei, Noto Sans CJK SC, Helvetica Neue, Arial, sans-serif">
   <defs>
-    <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <marker id="s1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#2f81f7"/>
     </marker>
-    <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <marker id="s2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#1f883d"/>
     </marker>
-    <marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <marker id="s3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#8c959f"/>
     </marker>
   </defs>
 
-  <rect width="980" height="640" fill="#ffffff"/>
+  <rect width="980" height="620" fill="#ffffff"/>
 
-  <text x="24" y="34" font-size="17" font-weight="700" fill="#1f2328">W2 同步：为什么不是整包覆盖</text>
-  <text x="24" y="56" font-size="12.5" fill="#656d76">多设备同时读写同一份收藏时，整包上传必然互相覆盖；op 日志能按语义合并</text>
+  <text x="24" y="34" font-size="17" font-weight="700" fill="#1f2328">W2 同步协议：操作日志，而不是整包覆盖</text>
+  <text x="24" y="56" font-size="12.5" fill="#656d76">两台设备各改各的，最后状态一致——靠的是"只传增量 + 服务端合并"</text>
 
-  <!-- ===== 对照表 ===== -->
-  <rect x="24" y="76" width="932" height="132" rx="10" fill="#f6f8fa" stroke="#d0d7de"/>
-  <text x="44" y="100" font-size="12" font-weight="700" fill="#1f2328">W1（原有 WebDAV）与 W2（本 fork 新增）</text>
+  <!-- 泳道头部 -->
+  <rect x="40" y="88" width="130" height="40" rx="9" fill="#eef4ff" stroke="#2f81f7"/>
+  <text x="105" y="113" font-size="12" font-weight="700" fill="#0a3069" text-anchor="middle">设备 A（手机）</text>
 
-  <line x1="300" y1="112" x2="300" y2="196" stroke="#d0d7de"/>
-  <line x1="640" y1="112" x2="640" y2="196" stroke="#d0d7de"/>
-  <line x1="44" y1="126" x2="936" y2="126" stroke="#d0d7de"/>
+  <rect x="425" y="88" width="130" height="40" rx="9" fill="#eaf7ee" stroke="#1f883d"/>
+  <text x="490" y="113" font-size="12" font-weight="700" fill="#0a3622" text-anchor="middle">venera-nas</text>
 
-  <text x="44" y="146" font-size="11" font-weight="700" fill="#57606a">维度</text>
-  <text x="312" y="146" font-size="11" font-weight="700" fill="#57606a">W1 · WebDAV</text>
-  <text x="652" y="146" font-size="11" font-weight="700" fill="#1f883d">W2 · op 日志</text>
+  <rect x="810" y="88" width="130" height="40" rx="9" fill="#f6f8fa" stroke="#8c959f"/>
+  <text x="875" y="113" font-size="12" font-weight="700" fill="#24292f" text-anchor="middle">设备 B（平板）</text>
 
-  <text x="44" y="168" font-size="11" fill="#1f2328">传输</text>
-  <text x="312" y="168" font-size="11" fill="#57606a">整个数据库 zip</text>
-  <text x="652" y="168" font-size="11" fill="#1f2328">只传增量操作</text>
+  <!-- 泳道竖线 -->
+  <line x1="105" y1="128" x2="105" y2="560" stroke="#eaeef2" stroke-width="2"/>
+  <line x1="490" y1="128" x2="490" y2="560" stroke="#eaeef2" stroke-width="2"/>
+  <line x1="875" y1="128" x2="875" y2="560" stroke="#eaeef2" stroke-width="2"/>
 
-  <text x="44" y="188" font-size="11" fill="#1f2328">冲突</text>
-  <text x="312" y="188" font-size="11" fill="#57606a">后者覆盖前者</text>
-  <text x="652" y="188" font-size="11" fill="#1f2328">集合求并 / LWW</text>
+  <!-- ===== 步骤 1 ===== -->
+  <rect x="150" y="150" width="290" height="64" rx="9" fill="#ffffff" stroke="#2f81f7" stroke-width="1.3"/>
+  <text x="166" y="172" font-size="11.5" font-weight="700" fill="#0a3069">首次接入</text>
+  <text x="166" y="191" font-size="10.5" fill="#57606a">本地已有的收藏、历史、源账号</text>
+  <text x="166" y="207" font-size="10.5" fill="#57606a">全部推上去（200 条一批）</text>
+  <line x1="105" y1="182" x2="146" y2="182" stroke="#2f81f7" stroke-width="1.8" marker-end="url(#s1)"/>
 
-  <!-- ===== 时序 ===== -->
-  <text x="24" y="244" font-size="13" font-weight="700" fill="#1f2328">一次同步的时序</text>
+  <!-- 服务端处理 -->
+  <rect x="545" y="150" width="290" height="64" rx="9" fill="#ffffff" stroke="#1f883d" stroke-width="1.3"/>
+  <text x="561" y="172" font-size="11.5" font-weight="700" fill="#0a3622">合并 + 编号</text>
+  <text x="561" y="191" font-size="10.5" fill="#57606a">每条操作落库拿一个自增 id（游标）；</text>
+  <text x="561" y="207" font-size="10.5" fill="#57606a">重复推送幂等，坏操作只记 warning</text>
+  <line x1="440" y1="182" x2="541" y2="182" stroke="#1f883d" stroke-width="1.8" marker-end="url(#s2)"/>
 
-  <!-- 三个泳道 -->
-  <rect x="60" y="262" width="150" height="34" rx="7" fill="#eef4ff" stroke="#2f81f7"/>
-  <text x="135" y="284" font-size="11.5" font-weight="700" fill="#0a3069" text-anchor="middle">客户端 A</text>
+  <!-- ===== 步骤 2 ===== -->
+  <rect x="150" y="246" width="290" height="64" rx="9" fill="#ffffff" stroke="#2f81f7" stroke-width="1.3"/>
+  <text x="166" y="268" font-size="11.5" font-weight="700" fill="#0a3069">日常使用中</text>
+  <text x="166" y="287" font-size="10.5" fill="#57606a">A 收藏了一本、看到了第 3 章——</text>
+  <text x="166" y="303" font-size="10.5" fill="#57606a">增量操作实时推上来，不传全量</text>
+  <line x1="105" y1="278" x2="146" y2="278" stroke="#2f81f7" stroke-width="1.8" marker-end="url(#s1)"/>
 
-  <rect x="60" y="306" width="150" height="34" rx="7" fill="#eaf7ee" stroke="#1f883d"/>
-  <text x="135" y="328" font-size="11.5" font-weight="700" fill="#0a3622" text-anchor="middle">venera-nas</text>
+  <!-- 服务端回传 -->
+  <rect x="545" y="246" width="290" height="64" rx="9" fill="#ffffff" stroke="#1f883d" stroke-width="1.3"/>
+  <text x="561" y="268" font-size="11.5" font-weight="700" fill="#0a3622">冲突怎么办</text>
+  <text x="561" y="287" font-size="10.5" fill="#57606a">收藏：集合语义，删除写墓碑，</text>
+  <text x="561" y="303" font-size="10.5" fill="#57606a">迟到的旧 add 复活不了　历史：按时间取新</text>
+  <line x1="440" y1="278" x2="541" y2="278" stroke="#1f883d" stroke-width="1.8" marker-end="url(#s2)"/>
 
-  <rect x="60" y="350" width="150" height="34" rx="7" fill="#f6f8fa" stroke="#8c959f"/>
-  <text x="135" y="372" font-size="11.5" font-weight="700" fill="#24292f" text-anchor="middle">客户端 B</text>
+  <!-- ===== 步骤 3：B 拉取 ===== -->
+  <rect x="545" y="342" width="290" height="64" rx="9" fill="#ffffff" stroke="#1f883d" stroke-width="1.3"/>
+  <text x="561" y="364" font-size="11.5" font-weight="700" fill="#0a3622">B 上线，只拉增量</text>
+  <text x="561" y="383" font-size="10.5" fill="#57606a">GET /sync/pull?cursor=N</text>
+  <text x="561" y="399" font-size="10.5" fill="#57606a">只回 N 之后的操作，排除 B 自己产生的</text>
+  <line x1="490" y1="374" x2="871" y2="374" stroke="#1f883d" stroke-width="1.8" marker-end="url(#s2)"/>
 
-  <line x1="135" y1="296" x2="135" y2="306" stroke="#d0d7de"/>
-  <line x1="135" y1="340" x2="135" y2="350" stroke="#d0d7de"/>
+  <rect x="700" y="430" width="200" height="52" rx="9" fill="#eaf7ee" stroke="#1f883d" stroke-width="1.3"/>
+  <text x="800" y="451" font-size="11.5" font-weight="700" fill="#0a3622" text-anchor="middle">B 的收藏和进度更新了</text>
+  <text x="800" y="470" font-size="10.5" fill="#57606a" text-anchor="middle">和 A 看到的是同一份状态</text>
+  <line x1="875" y1="406" x2="875" y2="426" stroke="#1f883d" stroke-width="1.8" marker-end="url(#s2)"/>
 
-  <!-- 步骤列 -->
-  <g font-size="11">
-    <!-- 1 bootstrap -->
-    <rect x="240" y="262" width="700" height="70" rx="8" fill="#ffffff" stroke="#2f81f7" stroke-width="1.2"/>
-    <text x="256" y="282" font-size="11.5" font-weight="700" fill="#0a3069">1 · 首次接入：快照引导</text>
-    <text x="256" y="301" fill="#57606a">GET /api/v1/sync/snapshot → 收藏按文件夹、历史、源配置与 Cookie、界面设置一次性下发</text>
-    <text x="256" y="318" fill="#8c959f">凭证先于收藏落地：服务端拿到 Cookie 之后才排队下载，否则任务只能拿着空登录态去撞墙</text>
-
-    <!-- 2 push -->
-    <rect x="240" y="344" width="700" height="86" rx="8" fill="#ffffff" stroke="#2f81f7" stroke-width="1.2"/>
-    <text x="256" y="364" font-size="11.5" font-weight="700" fill="#0a3069">2 · 本地改动：分批推送</text>
-    <text x="256" y="383" fill="#57606a">POST /api/v1/sync/push  { clientId, lamport, ops[] }</text>
-    <text x="256" y="400" fill="#57606a">ops = fav.add / fav.remove / fav.move / history.update / source.data / source.cookie / setting.update</text>
-    <text x="256" y="417" fill="#8c959f">每批 200 条；单条坏操作只回 warning，不中断整批；重复提交幂等</text>
-
-    <!-- 3 服务端合并 -->
-    <rect x="240" y="442" width="700" height="70" rx="8" fill="#ffffff" stroke="#1f883d" stroke-width="1.2"/>
-    <text x="256" y="462" font-size="11.5" font-weight="700" fill="#0a3622">3 · 服务端合并并分配游标</text>
-    <text x="256" y="481" fill="#57606a">收藏：集合语义（删除写墓碑，挡住迟到的旧 add 复活）　历史：LWW，按客户端时间戳</text>
-    <text x="256" y="498" fill="#8c959f">每次落库进 ops 表拿一个自增 id，这个 id 就是游标</text>
-
-    <!-- 4 pull -->
-    <rect x="240" y="524" width="700" height="70" rx="8" fill="#ffffff" stroke="#8c959f" stroke-width="1.2"/>
-    <text x="256" y="544" font-size="11.5" font-weight="700" fill="#24292f">4 · 其它设备增量拉取</text>
-    <text x="256" y="563" fill="#57606a">GET /api/v1/sync/pull?cursor=N → 只回 N 之后的操作；排除自己产生的，避免回声</text>
-    <text x="256" y="580" fill="#8c959f">游标被裁剪过 → 返回 resyncRequired，客户端改走快照重建</text>
-  </g>
-
-  <!-- 泳道到步骤的箭头 -->
-  <line x1="212" y1="279" x2="236" y2="279" stroke="#2f81f7" stroke-width="1.6" marker-end="url(#a1)"/>
-  <line x1="212" y1="387" x2="236" y2="387" stroke="#2f81f7" stroke-width="1.6" marker-end="url(#a1)"/>
-  <line x1="212" y1="323" x2="236" y2="477" stroke="#1f883d" stroke-width="1.6" marker-end="url(#a2)"/>
-  <line x1="212" y1="367" x2="236" y2="559" stroke="#8c959f" stroke-width="1.6" marker-end="url(#a3)"/>
-
-  <text x="24" y="620" font-size="11" fill="#8c959f">W1 仍挂在 /webdav/：老客户端把 .venera 整包丢上去，服务端解包入同一套表，之后可以无缝切到 W2。</text>
+  <!-- ===== 底部：与 W1 对比 ===== -->
+  <rect x="40" y="500" width="900" height="96" rx="10" fill="#f6f8fa" stroke="#d0d7de"/>
+  <text x="60" y="524" font-size="11.5" font-weight="700" fill="#1f2328">和上游 WebDAV 同步（W1）的差别</text>
+  <text x="60" y="546" font-size="10.8" fill="#57606a">W1：整个数据库打成 zip 上传下载，两台设备先后同步 = 后者把前者覆盖掉；服务端只是个网盘，无法下发任何信息。</text>
+  <text x="60" y="566" font-size="10.8" fill="#57606a">W2：只传增量操作，服务端按语义合并成一份状态；这台服务端同时还管下载和缓存，它必须知道真实状态，W1 给不了。</text>
+  <text x="60" y="586" font-size="10.2" fill="#8c959f">W1 仍保留在 /webdav/，老数据可以先迁进来再切 W2。</text>
 </svg>
