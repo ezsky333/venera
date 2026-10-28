@@ -1,67 +1,55 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 520" width="980" height="520" font-family="PingFang SC, Hiragino Sans GB, Microsoft YaHei, Noto Sans CJK SC, Helvetica Neue, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 440" width="980" height="440" font-family="PingFang SC, Hiragino Sans GB, Microsoft YaHei, Noto Sans CJK SC, Helvetica Neue, Arial, sans-serif">
   <defs>
-    <marker id="k1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+    <marker id="o1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#1f883d"/>
     </marker>
-    <marker id="k2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#d1242f"/>
+    <marker id="o2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#9a6700"/>
     </marker>
   </defs>
 
-  <rect width="980" height="520" fill="#ffffff"/>
+  <rect width="980" height="440" fill="#ffffff"/>
 
-  <text x="24" y="34" font-size="17" font-weight="700" fill="#1f2328">离线模式：人在外面，家里 NAS 随时可用</text>
-  <text x="24" y="56" font-size="12.5" fill="#656d76">两种典型场景，资源都只从 NAS 取</text>
+  <text x="24" y="34" font-size="17" font-weight="700" fill="#1f2328">离线模式：资源从哪来</text>
+  <text x="24" y="56" font-size="12.5" fill="#656d76">开不开这个开关，决定的是"NAS 缓存之外的请求还发不发"</text>
 
-  <!-- ===== 场景一 ===== -->
-  <rect x="24" y="80" width="452" height="196" rx="12" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.5"/>
-  <text x="44" y="108" font-size="12.5" font-weight="700" fill="#1f2328">场景一 · 在外网，家里 NAS 通过内网穿透可达</text>
+  <!-- 左：关 -->
+  <rect x="24" y="80" width="452" height="272" rx="12" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.5"/>
+  <text x="44" y="108" font-size="12.5" font-weight="700" fill="#1f2328">关（默认）· 正常在线使用</text>
 
-  <rect x="44" y="124" width="120" height="44" rx="8" fill="#ffffff" stroke="#d0d7de"/>
-  <text x="104" y="151" font-size="11.5" fill="#1f2328" text-anchor="middle">手机 · 4G/5G</text>
+  <g font-size="11.2" fill="#3d4451">
+    <text x="44" y="136">本地有缓存 → 读本地</text>
+    <text x="44" y="158">本地没有 → 看 NAS 有没有，有就直接读</text>
+    <text x="44" y="180">NAS 也没有 → 照常请求源站现取</text>
+  </g>
 
-  <line x1="164" y1="146" x2="216" y2="146" stroke="#1f883d" stroke-width="2" marker-end="url(#k1)"/>
-  <text x="190" y="134" font-size="10.5" fill="#1f883d" text-anchor="middle">穿透</text>
+  <rect x="44" y="204" width="412" height="60" rx="8" fill="#ffffff" stroke="#d0d7de"/>
+  <text x="60" y="226" font-size="11" font-weight="700" fill="#1f2328">适合：家里、公司，网络顺畅的时候</text>
+  <text x="60" y="246" font-size="10.5" fill="#57606a">NAS 缓存先顶上，源站只兜最底，重复下载几乎不会发生</text>
 
-  <rect x="222" y="124" width="120" height="44" rx="8" fill="#eaf7ee" stroke="#1f883d" stroke-width="1.4"/>
-  <text x="282" y="151" font-size="11.5" font-weight="700" fill="#0a3622" text-anchor="middle">家里 NAS</text>
+  <text x="44" y="292" font-size="10.5" fill="#8c959f">缓存命中顺序：本地 → NAS → 源站，每一级都能独立工作</text>
 
-  <text x="44" y="196" font-size="11" fill="#57606a">封面、详情、正文、缩略图全部从 NAS 取，</text>
-  <text x="44" y="215" font-size="11" fill="#57606a">行为和在家里完全一样。手机到源站的请求为零，</text>
-  <text x="44" y="234" font-size="11" fill="#57606a">所以不需要代理、不怕源站墙、不暴露访问记录。</text>
-  <text x="44" y="259" font-size="10.3" fill="#8c959f">这一步的前提只是 NAS 能被访问到（DDNS / frp / Tailscale 均可）。</text>
+  <!-- 右：开 -->
+  <rect x="500" y="80" width="456" height="272" rx="12" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.5"/>
+  <text x="520" y="108" font-size="12.5" font-weight="700" fill="#1f2328">开 · 离线 NAS 模式</text>
 
-  <!-- ===== 场景二 ===== -->
-  <rect x="500" y="80" width="456" height="196" rx="12" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.5"/>
-  <text x="520" y="108" font-size="12.5" font-weight="700" fill="#1f2328">场景二 · NAS 暂时连不上</text>
+  <g font-size="11.2" fill="#3d4451">
+    <text x="520" y="136">本地有缓存 → 读本地（不变）</text>
+    <text x="520" y="158">本地没有 → 看 NAS 有没有，有就直接读（不变）</text>
+    <text x="520" y="180">NAS 也没有 → 到此为止，不再去源站</text>
+  </g>
 
-  <rect x="520" y="124" width="120" height="44" rx="8" fill="#ffffff" stroke="#d0d7de"/>
-  <text x="580" y="151" font-size="11.5" fill="#1f2328" text-anchor="middle">手机 · 无 NAS</text>
+  <rect x="520" y="204" width="416" height="60" rx="8" fill="#fff8e6" stroke="#d4a72c" stroke-width="1.2"/>
+  <text x="536" y="226" font-size="11" font-weight="700" fill="#7d4e00">适合：外网访问家里 NAS 的时候</text>
+  <text x="536" y="246" font-size="10.5" fill="#6b5200">配合内网穿透（DDNS / frp / Tailscale 均可），体验与在家一致</text>
 
-  <rect x="520" y="186" width="200" height="52" rx="8" fill="#ffffff" stroke="#d0d7de"/>
-  <text x="620" y="208" font-size="11.5" font-weight="700" fill="#1f2328" text-anchor="middle">已缓存章节照常读</text>
-  <text x="620" y="226" font-size="10.3" fill="#8c959f" text-anchor="middle">本地下载过的内容不受影响</text>
+  <text x="520" y="292" font-size="10.5" fill="#8c959f">封面、详情、缩略图同样只走 NAS，页面路径在 NAS 上闭环</text>
 
-  <rect x="520" y="122" width="416" height="0" fill="none"/>
-  <rect x="740" y="124" width="196" height="44" rx="8" fill="#ffffff" stroke="#d1242f" stroke-dasharray="4 3"/>
-  <text x="838" y="144" font-size="11" font-weight="700" fill="#c93c37" text-anchor="middle">未缓存的章节</text>
-  <text x="838" y="161" font-size="10.3" fill="#c93c37" text-anchor="middle">明确提示，不转圈不报错</text>
+  <!-- 中间箭头：开 -->
+  <text x="478" y="120" font-size="18" font-weight="700" fill="#9a6700" text-anchor="middle">→</text>
 
-  <line x1="580" y1="168" x2="580" y2="182" stroke="#d1242f" stroke-width="1.6"/>
-  <line x1="838" y1="168" x2="838" y2="182" stroke="#d1242f" stroke-width="1.6"/>
-
-  <text x="520" y="259" font-size="10.3" fill="#8c959f">关掉开关则回到正常在线路径：先试源站，失败再回落 NAS。</text>
-
-  <!-- ===== 打开方式 ===== -->
-  <rect x="24" y="296" width="932" height="112" rx="10" fill="#eef4ff" stroke="#2f81f7" stroke-width="1.2"/>
-  <text x="44" y="320" font-size="12" font-weight="700" fill="#0a3069">怎么开</text>
-  <text x="44" y="342" font-size="11.2" fill="#3d4451">首页顶部「离线 NAS 模式」开关，点一下就生效，没有任何配置。</text>
-  <text x="44" y="361" font-size="11.2" fill="#3d4451">打开之后整条页面路径都在 NAS 上闭环：详情页、封面、缩略图、正文，命中缓存之后日志里不再出现任何源站域名。</text>
-  <text x="44" y="380" font-size="11.2" fill="#3d4451">开关的判定用的是本地状态本身——探测网络是异步的，拿探测结果当开关会有竞态，这是实测踩过的坑。</text>
-
-  <!-- ===== 与普通模式的区别 ===== -->
-  <rect x="24" y="424" width="932" height="72" rx="10" fill="#f6f8fa" stroke="#d0d7de"/>
-  <text x="44" y="448" font-size="12" font-weight="700" fill="#1f2328">和不开离线模式的区别</text>
-  <text x="44" y="469" font-size="11.2" fill="#57606a">不开：本地 → NAS → 源站，三级兜底，NAS 没有的章节会去源站现取（需要设备能访问源站）。</text>
-  <text x="44" y="487" font-size="11.2" fill="#57606a">开：只有本地 → NAS 两级，缓存之外的一切请求被拦下，外网环境里省掉的是几十秒的超时等待。</text>
+  <!-- 底部 -->
+  <rect x="24" y="368" width="932" height="48" rx="10" fill="#eef4ff" stroke="#2f81f7" stroke-width="1.2"/>
+  <text x="44" y="388" font-size="11.5" font-weight="700" fill="#0a3069">怎么开：首页顶部「离线 NAS 模式」开关，点一下即生效</text>
+  <text x="44" y="406" font-size="11" fill="#3d4451">判定用的是开关状态本身，不依赖网络探测结果——探测是异步的，拿它当开关会有竞态。</text>
 </svg>
