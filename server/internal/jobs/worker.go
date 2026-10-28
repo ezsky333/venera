@@ -120,6 +120,26 @@ func (w *Worker) runJob(workerID int, job *model.Job) {
 	if err != nil {
 		msg := fmt.Sprintf("load comic info: %v", err)
 
+		// 情况一：登录态还没同步过来。
+		//
+		// 真机现场：客户端刚连上 NAS，收藏先落库 → 200 个任务立刻开跑，
+		// 而 source_cookies 还是空的 → pica 全部 "Not logged in"、
+		// ehentai 全部 302，全部被记成永久失败。等 Cookie 到了，
+		// 这些任务已经死了，用户看到的是"连上了但一本都下不动"。
+		//
+		// 判据要两个条件同时成立才算"还没到"：
+		//   1. 错误看起来是登录/权限类；
+		//   2. 该源从来没收到过任何 source.data / source.cookie。
+		// 第 2 条是关键——已经同步过凭证还登不上，那就是凭证真的失效了，
+		// 这时候推迟只会让任务永远卡在队列里。
+		if isAuthError(msg) && !w.st.SourceCredentialsKnown(job.Source) {
+			if n, derr := w.st.DeferJob(job.ID, "waiting for client credentials"); derr == nil && n > 0 {
+				w.logf("job %d deferred: source %q has no credentials synced yet (%s)",
+					job.ID, job.Source, msg)
+				return
+			}
+		}
+
 		// 网络类抖动值得再试一次；配置/登录类错误重试只是浪费。
 		if job.Attempts < maxJobAttempts && isRetriableError(msg) {
 			if n, rerr := w.st.BumpJobAttempt(job.ID, msg); rerr == nil && n > 0 {
@@ -146,6 +166,41 @@ func (w *Worker) runJob(workerID int, job *model.Job) {
 
 // maxJobAttempts 是单个任务的最大执行次数（含首次）。
 const maxJobAttempts = 2
+
+// isAuthError 判断失败是否属于"登录态缺失/失效"这一类。
+//
+// 这类错误和网络抖动必须分开处理：
+//   - 网络抖动 → 等一会儿重试有意义；
+//   - 登录态缺失 → 重试一万次也没用，必须等客户端把 Cookie 同步上来。
+//
+// 各源的表现形式并不统一，实测见过的有：
+//   - picacg：Error: Not logged in（源脚本自己 reLogin 抛的）
+//   - ehentai/exhentai：Invalid status code: 302（未登录被重定向到登录页）
+//   - 通用：401 / 403 / invalid login
+func isAuthError(msg string) bool {
+	auth := []string{
+		"Not logged in",
+		"not logged in",
+		"not login",
+		"invalid login",
+		"login required",
+		"unauthorized",
+		"Invalid status code: 302",
+		"Invalid Status Code 302",
+		"Invalid status code: 401",
+		"Invalid Status Code 401",
+		"Invalid status code: 403",
+		"Invalid Status Code 403",
+		"may not have permission",
+		"You may not have permission",
+	}
+	for _, p := range auth {
+		if strings.Contains(msg, p) {
+			return true
+		}
+	}
+	return false
+}
 
 // isRetriableError 判断失败是否属于"过一会儿再试可能就好了"。
 //

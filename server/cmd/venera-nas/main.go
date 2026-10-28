@@ -198,6 +198,27 @@ func run(cfg config.Config, logger *slog.Logger, doImport bool, archive string) 
 		logger.Info("source removed by client", "source", sourceKey)
 		return nil
 	}
+	// 登录态落库 → 叫醒之前因"没凭证"被推迟的下载任务。
+	//
+	// 真机现场：客户端连上后先落 200 条收藏，worker 立刻开跑，
+	// 此时 source_cookies 还是空的 → pica 全部 "Not logged in"、
+	// ehentai 全部 302。这些任务现在会被推迟而不是判死，
+	// 但必须有人在这里把它们放回队列，否则要等用户手动重试。
+	//
+	// 不需要在这里刷新源运行时：Manager.withHost 每次调用都新建
+	// jshost.Host，Cookie 由 store 实时读取，不存在"持有旧 Cookie
+	// 的常驻实例"。
+	syncEngine.OnSourceCredentials = func(sourceKey string) error {
+		n, err := st.ResetDeferredJobs(sourceKey)
+		if err != nil {
+			return err
+		}
+		if n > 0 {
+			logger.Info("credentials synced, requeued deferred jobs",
+				"source", sourceKey, "count", n)
+		}
+		return nil
+	}
 	// 快照里的源清单以磁盘实际扫描结果为准
 	syncEngine.ListInstalledSources = func() []store.SourceInfo {
 		list := srcMgr.List()

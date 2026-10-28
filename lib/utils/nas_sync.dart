@@ -324,12 +324,18 @@ class NasSync with ChangeNotifier {
         return 0;
       }
       var ops = _dedupe(batch);
-      var res = await dio.post('/api/v1/sync/push', data: {
-        'clientId': client.config.clientId,
-        'deviceName': _deviceName(),
-        'lamport': DateTime.now().millisecondsSinceEpoch,
-        'ops': ops,
-      });
+      var res = await dio.post(
+        '/api/v1/sync/push',
+        data: {
+          'clientId': client.config.clientId,
+          'deviceName': _deviceName(),
+          'lamport': DateTime.now().millisecondsSinceEpoch,
+          'ops': ops,
+        },
+        // 与 bootstrap 同因：默认 30s 在真机 NAS 上会把正常写入判成失败，
+        // 失败后 op 被塞回队列，于是同一条历史反复重推、永远推不完。
+        options: Options(receiveTimeout: pushTimeout, sendTimeout: pushTimeout),
+      );
       if (res.statusCode == 200 && res.data is Map) {
         var cursor = (res.data['cursor'] as num?)?.toInt();
         if (cursor != null) {
@@ -596,6 +602,12 @@ class NasSync with ChangeNotifier {
     // 首次连接必须把 App 里各站点的私有配置推给服务端，否则服务端拿着
     // 空配置去下载收藏，会得到 "invalid url: null/comics/..." 这类报错
     // （picacg 的 apiUrl 为空就是这样）。
+    //
+    // 这些 op 单独放进 credentialOps，最后**拼到 ops 最前面**：
+    // 服务端收到 fav.add 就会立刻排队下载，如果 Cookie 还没到，
+    // 下载任务只能拿着空登录态去撞墙（真机现场：200 个任务全失败）。
+    // 凭证先到 → 任务开跑时登录态已经就位。
+    final credentialOps = <Map<String, dynamic>>[];
     try {
       for (final source in ComicSourceManager().all()) {
         final data = source.data;
@@ -606,20 +618,20 @@ class NasSync with ChangeNotifier {
         // 但登录态仍然在 Cookie 里。早先的写法 `if (data.isEmpty) continue;`
         // 会把这类源连同它的 Cookie 一起跳过，表现为"服务端一条 nhentai
         // cookie 都没有"，登录态自然传不过去。
-        if (plain.isNotEmpty) {
-          ops.add({
-            'type': 'source.data',
-            'payload': {'source': source.key, 'data': plain},
-          });
-        }
+        //
+        // 现在连"空 data / 空 cookie"也要推一条：
+        // 服务端据此知道"这个源的登录态我已经知道了"，不必再等；
+        // 否则无凭证的源会让任务一直挂着等一个永远不会来的 op。
+        credentialOps.add({
+          'type': 'source.data',
+          'payload': {'source': source.key, 'data': plain},
+        });
         // 登录态常常只存在于 Cookie 里，必须一起推
         final cookies = NasCookieExport.exportForSource(source.key, plain);
-        if (cookies.isNotEmpty) {
-          ops.add({
-            'type': 'source.cookie',
-            'payload': {'source': source.key, 'cookies': cookies},
-          });
-        }
+        credentialOps.add({
+          'type': 'source.cookie',
+          'payload': {'source': source.key, 'cookies': cookies},
+        });
       }
     } catch (e) {
       Log.error('NAS Sync', 'bootstrap: read source configs failed: $e');
@@ -633,30 +645,87 @@ class NasSync with ChangeNotifier {
       Log.error('NAS Sync', 'bootstrap: read settings failed: $e');
     }
 
+    // 凭证插到最前：第一批就是它，服务端落库后下载任务才有登录态可用。
+    ops.insertAll(0, credentialOps);
+
     if (ops.isEmpty) return 0;
     Log.info('NAS Sync', 'bootstrap: pushing ${ops.length} existing records');
 
+    // 分批推送。
+    //
+    // 关键约束：**任何一批失败都不能直接 return**。
+    //
+    // 旧写法是 `catch (e) { return sent; }`，看起来"优雅降级"，
+    // 实际后果是：第一批（收藏）超时 → 后面所有批次（阅读历史、
+    // 源 Cookie、界面设置）永远发不出去，而且用户看不到任何提示。
+    // 真机现场就是这个样子：服务端 favorites=200（正好一个批次），
+    // histories=0、source_cookies=0，而本地有 564 本收藏。
+    // 下载任务于是拿着空 Cookie 去跑，pica 全部 "Not logged in"。
+    //
+    // 现在改成：每批重试 maxPushRetries 次（指数退避），仍失败则记录
+    // 并继续下一批——丢一批好过丢全部，且失败会汇总上报。
     const batchSize = 200;
+    const maxPushRetries = 3;
+    var failedBatches = 0;
+
     for (var i = 0; i < ops.length; i += batchSize) {
       final batch = ops.sublist(i, (i + batchSize).clamp(0, ops.length));
-      try {
-        var res = await dio.post('/api/v1/sync/push', data: {
-          'clientId': client.config.clientId,
-          'deviceName': _deviceName(),
-          'lamport': DateTime.now().millisecondsSinceEpoch,
-          'ops': batch,
-        });
-        if (res.statusCode == 200 && res.data is Map) {
-          var cursor = (res.data['cursor'] as num?)?.toInt();
-          if (cursor != null) await client.updateCursor(cursor);
-          sent += batch.length;
-        } else {
-          Log.error('NAS Sync', 'bootstrap push failed: ${res.statusCode}');
+      var ok = false;
+
+      for (var attempt = 1; attempt <= maxPushRetries && !ok; attempt++) {
+        try {
+          var res = await dio.post(
+            '/api/v1/sync/push',
+            data: {
+              'clientId': client.config.clientId,
+              'deviceName': _deviceName(),
+              'lamport': DateTime.now().millisecondsSinceEpoch,
+              'ops': batch,
+            },
+            // 默认 30s 不够：真机 NAS 落 200 条要一分钟以上。
+            options: Options(receiveTimeout: pushTimeout, sendTimeout: pushTimeout),
+          );
+          if (res.statusCode == 200 && res.data is Map) {
+            var cursor = (res.data['cursor'] as num?)?.toInt();
+            if (cursor != null) await client.updateCursor(cursor);
+            sent += batch.length;
+            ok = true;
+            Log.info(
+              'NAS Sync',
+              'bootstrap push ok: batch=${batch.length} '
+                  '(offset=$i/${ops.length}) attempt=$attempt cursor=$cursor',
+            );
+          } else {
+            Log.error(
+              'NAS Sync',
+              'bootstrap push failed: HTTP ${res.statusCode} '
+                  '(offset=$i/${ops.length}, attempt=$attempt)',
+            );
+          }
+        } catch (e) {
+          Log.error(
+            'NAS Sync',
+            'bootstrap push error (offset=$i/${ops.length}, '
+                'attempt=$attempt/$maxPushRetries): $e',
+          );
         }
-      } catch (e) {
-        Log.error('NAS Sync', 'bootstrap push error: $e');
-        return sent;
+
+        if (!ok && attempt < maxPushRetries) {
+          // 1s, 2s, 4s ... 给服务端喘口气，也避开瞬时网络抖动
+          await Future.delayed(Duration(seconds: 1 << (attempt - 1)));
+        }
       }
+
+      if (!ok) failedBatches++;
+    }
+
+    if (failedBatches > 0) {
+      _lastError = 'bootstrap: $failedBatches batch(es) failed';
+      Log.error(
+        'NAS Sync',
+        'bootstrap finished with $failedBatches failed batch(es): '
+            'pushed $sent/${ops.length} ops',
+      );
     }
     return sent;
   }
@@ -960,6 +1029,20 @@ class NasSync with ChangeNotifier {
     );
     return dio;
   }
+
+  /// 推送专用超时。
+  ///
+  /// 30s 的默认 receiveTimeout 是"首次同步只同步了一半"的元凶：
+  /// 真机 NAS（ZFS + 机械盘）上服务端落 200 条 op 要 60~130 秒，
+  /// 客户端 30 秒就放弃 → _bootstrapPush 直接 return →
+  /// 历史记录、源 Cookie、界面设置**一个都没推上去**。
+  ///
+  /// 现场症状完全对得上：服务端 favorites=200、histories=0、
+  /// source_cookies=0，而用户的收藏是 564 本。
+  ///
+  /// 服务端侧已经修掉了慢写（synchronous=NORMAL，200 条降到 1s 级），
+  /// 这里再给足余量，避免网络抖动或大图封面把某一批拖过 30 秒。
+  static const pushTimeout = Duration(minutes: 3);
 
   /// 把远端操作应用到本地状态。
   ///

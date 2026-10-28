@@ -93,6 +93,10 @@ func (s *Server) Handler() http.Handler {
 	api.HandleFunc("POST /api/v1/sync/push", s.handleSyncPush)
 	api.HandleFunc("GET /api/v1/sync/pull", s.handleSyncPull)
 	api.HandleFunc("GET /api/v1/sync/snapshot", s.handleSyncSnapshot)
+	// 轻量的"源登录态"端点：增量同步路径靠它补 Cookie / 源配置。
+	// 客户端 NasSync._pullSourceCredentials 一直在调，服务端缺了它就会 404，
+	// 于是"pica 账号没同步过来"、"ehentai 302"这类问题在增量路径上永远好不了。
+	api.HandleFunc("GET /api/v1/sync/source-credentials", s.handleSourceCredentials)
 	api.HandleFunc("POST /api/v1/sync/source-type", s.handleSourceType)
 	api.HandleFunc("GET /api/v1/sync/clients", s.handleClients)
 
@@ -352,6 +356,22 @@ func (s *Server) handleSyncSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, snap)
+}
+
+// handleSourceCredentials 下发各源的登录态（配置 + Cookie）。
+//
+//	GET /api/v1/sync/source-credentials
+//
+// 为什么不复用快照：快照含 500 条历史 + 全部收藏（几百 KB），
+// 而补登录态只要几十 KB。增量同步（游标已存在）不会走快照路径，
+// 但"新装了一个源""本地 data 被清掉"这类情况仍然需要这份数据。
+func (s *Server) handleSourceCredentials(w http.ResponseWriter, r *http.Request) {
+	creds, err := s.sync.BuildSourceCredentials()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, creds)
 }
 
 // handleSourceType 让客户端上报权威的 sourceKey.hashCode。

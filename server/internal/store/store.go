@@ -53,8 +53,40 @@ func Open(dataDir, libraryDir string) (*Store, error) {
 	}
 
 	dbPath := filepath.Join(dataDir, "nas.db")
-	// WAL 允许读写并发；busy_timeout 避免瞬时锁冲突直接报错。
-	dsn := "file:" + dbPath + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
+
+	// DSN 里每个参数都是在真机上报错过之后才加上去的，逐条说明：
+	//
+	// journal_mode(WAL)
+	//   读写并发。默认的 delete 模式下一个写事务会把所有读请求挡住，
+	//   管理面板在下载时刷不动。
+	//
+	// synchronous(NORMAL)
+	//   WAL 下 NORMAL 只在 checkpoint 时 fsync，提交不再逐次刷盘。
+	//   这是"推送 200 条要 131 秒"的直接原因：每条 op 3 次提交
+	//   （AddFavorite / UpsertComic / AppendOp），真机 NAS 是 ZFS +
+	//   机械盘，一次 fsync ≈ 200ms，200 条 = 600 次 = 120 秒。
+	//   代价是掉电可能丢最后几个事务，但库本身不会损坏。
+	//
+	// busy_timeout(15000)
+	//   写冲突排队而不是立刻报错。15s 是为了让"整批推送"这种长事务
+	//   期间的 claim 请求能等到锁，而不是 2 秒一次刷屏。
+	//
+	// _txlock=immediate
+	//   这是 SQLITE_BUSY 刷屏的真正解药。database/sql 默认 BEGIN 是
+	//   deferred：事务先做 SELECT 拿读锁，写的时候再升级。WAL 下如果
+	//   这期间别的连接提交过，升级会返回 SQLITE_BUSY_SNAPSHOT，而
+	//   **busy_timeout 对这种错误完全不生效**——立即失败。
+	//   现场日志里 claim job 每 2 秒报一次 database is locked (5)、
+	//   一次都没等满 5 秒，就是这个原因。
+	//   immediate 让 BEGIN 直接拿写锁，busy_timeout 才会正常排队。
+	//   本包所有 Begin() 都是写事务（AddFavorite / RemoveFavorite /
+	//   MoveFavorite / PutCookies / ClaimNextJob），因此不影响只读查询。
+	dsn := "file:" + dbPath +
+		"?_pragma=journal_mode(WAL)" +
+		"&_pragma=synchronous(NORMAL)" +
+		"&_pragma=busy_timeout(15000)" +
+		"&_pragma=foreign_keys(1)" +
+		"&_txlock=immediate"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
@@ -274,6 +306,16 @@ func (s *Store) migrate() error {
 	}
 	// jobs.priority 支持"置顶"：数值大的先被 worker 领取。
 	if err := s.ensureColumn("jobs", "priority", "INTEGER DEFAULT 0"); err != nil {
+		return err
+	}
+	// jobs.deferred 记录"因为登录态还没同步过来而推迟"的次数。
+	//
+	// 为什么要单独一列而不是复用 attempts：这两件事语义完全不同。
+	// attempts 是"真的执行失败了"，deferred 是"还不该执行"。
+	// 混用会导致真机上的那个现象——客户端刚连上、Cookie 还没推上来，
+	// 200 个任务瞬间被判成失败（attempts 打满），等 Cookie 到了
+	// 也没有任何东西会去重跑它们。
+	if err := s.ensureColumn("jobs", "deferred", "INTEGER DEFAULT 0"); err != nil {
 		return err
 	}
 	// comics 的展示字段：NAS 兜底详情页需要它们才不会丢作者/简介。

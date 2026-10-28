@@ -34,6 +34,12 @@ type Syncer struct {
 	OnSourceScript func(payload model.SourceScriptOpPayload) error
 	// OnSourceRemove 在客户端卸载源时调用。
 	OnSourceRemove func(sourceKey string) error
+	// OnSourceCredentials 在该源的登录态（data 或 cookie）落库后调用。
+	//
+	// 用途：把"等登录态"期间推迟的下载任务放回队列。没有这个回调，
+	// 客户端连上后先落收藏、任务立刻开跑并因无 Cookie 被推迟，
+	// 之后 Cookie 到了也没人叫醒它们，只能等用户手动重试。
+	OnSourceCredentials func(sourceKey string) error
 	// ListInstalledSources 返回服务端当前实际持有的源（磁盘扫描结果）。
 	// 快照用它作答，保证客户端看到的源清单与真实可用的一致。
 	ListInstalledSources func() []store.SourceInfo
@@ -252,6 +258,11 @@ func (s *Syncer) apply(clientID string, op PushOp, lamport int64) (bool, string,
 		if err := s.st.MergeSourceData(payload.Source, payload.Data); err != nil {
 			return false, "", nil, err
 		}
+		if s.OnSourceCredentials != nil {
+			if err := s.OnSourceCredentials(payload.Source); err != nil {
+				return true, "credentials hook: " + err.Error(), nil, nil
+			}
+		}
 		return true, "", nil, nil
 
 	case model.OpSourceCookie:
@@ -264,6 +275,11 @@ func (s *Syncer) apply(clientID string, op PushOp, lamport int64) (bool, string,
 		}
 		if err := s.st.PutCookies(payload.Source, payload.Cookies); err != nil {
 			return false, "", nil, err
+		}
+		if s.OnSourceCredentials != nil {
+			if err := s.OnSourceCredentials(payload.Source); err != nil {
+				return true, "credentials hook: " + err.Error(), nil, nil
+			}
 		}
 		return true, "", nil, nil
 
@@ -397,6 +413,33 @@ func (s *Syncer) Pull(req PullRequest) (*PullResponse, error) {
 		resp.Cursor = ops[len(ops)-1].ID
 	}
 	return resp, nil
+}
+
+// SourceCredentials 是只包含"源登录态"的轻量响应。
+//
+// 单独做一个端点而不是复用快照：快照含 500 条历史 + 全部收藏（几百 KB），
+// 而"补登录态"只需要几十 KB。增量同步路径（游标已存在）不会走
+// _pullSnapshot，但新装的源、或本地 data 被清掉的设备仍然需要这份数据，
+// 所以必须有个便宜的入口。
+//
+// 现场教训：客户端早就在调这个端点，服务端却一直 404（端点只写在了
+// 一个没进仓库的副本里），于是增量路径永远补不上 Cookie，
+// 表现为"pica 账号没同步过来"、"ehentai 详情 302"。
+type SourceCredentials struct {
+	Data    map[string]map[string]any       `json:"data,omitempty"`
+	Cookies map[string][]model.CookieRecord `json:"cookies,omitempty"`
+}
+
+// BuildSourceCredentials 生成源登录态快照。
+func (s *Syncer) BuildSourceCredentials() (*SourceCredentials, error) {
+	out := &SourceCredentials{}
+	if data, err := s.st.AllSourceData(); err == nil && len(data) > 0 {
+		out.Data = data
+	}
+	if cookies, err := s.st.AllCookies(); err == nil && len(cookies) > 0 {
+		out.Cookies = cookies
+	}
+	return out, nil
 }
 
 // Snapshot 是服务端当前状态的完整快照，用于客户端首次接入或游标过期后的重建。

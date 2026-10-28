@@ -956,6 +956,64 @@ func (s *Store) RequeueStaleJobs() (int64, error) {
 	return res.RowsAffected()
 }
 
+// DeferJob 把任务放回 pending，但**不算失败**、也不累加 attempts。
+//
+// 用途：任务本身没问题，只是执行条件还没就绪（最典型的就是
+// "客户端的登录态还没同步上来"）。真机现场：客户端刚连上 NAS，
+// 收藏先落库、200 个下载任务立刻开跑，而此时 source_cookies 还是空的，
+// 于是 pica 全部 "Not logged in"、ehentai 全部 302 —— 这 200 条
+// 被记成失败之后，就算 Cookie 后来到了也不会有人去重跑它们。
+//
+// 返回受影响行数；0 表示任务状态已变（被取消/被别人领走），调用方应放弃。
+func (s *Store) DeferJob(id int64, reason string) (int64, error) {
+	res, err := s.db.Exec(
+		`UPDATE jobs SET status = 'pending', deferred = COALESCE(deferred, 0) + 1,
+		        message = 'deferred: ' || ?, updated_at = ?
+		  WHERE id = ? AND status = 'running'`,
+		reason, time.Now().UnixMilli(), id)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// SourceCredentialsKnown 判断某个源的登录态是否已经同步过来。
+//
+// 判据是"客户端为该源推过 source.data 或 source.cookie 操作"。
+// 客户端每次 bootstrap 都会为**每个源**推这两条（即使是空值），
+// 因此"有记录"就等价于"客户端已经交代过这个源的登录态了"。
+//
+// 用途：worker 遇到登录类错误时用它区分两种情况——
+//   - 从没同步过 → 是"还没到"，推迟，等下一批同步；
+//   - 已经同步过还是登不上 → 是真的凭证失效，直接判失败。
+func (s *Store) SourceCredentialsKnown(sourceKey string) bool {
+	var n int
+	err := s.db.QueryRow(
+		`SELECT (SELECT COUNT(*) FROM source_data WHERE source_key = ?)
+		      + (SELECT COUNT(*) FROM source_cookies WHERE source_key = ?)`,
+		sourceKey, sourceKey).Scan(&n)
+	return err == nil && n > 0
+}
+
+// ResetDeferredJobs 把"等登录态"期间推迟的任务重新放回队列。
+//
+// 客户端推完 source.data / source.cookie 之后调用：此时凭证已就位，
+// 之前推迟的任务可以立刻重跑，不必等 worker 轮询自然捡起。
+func (s *Store) ResetDeferredJobs(sourceKey string) (int64, error) {
+	q := `UPDATE jobs SET status = 'pending', message = 'credentials synced', updated_at = ?
+	       WHERE status = 'pending' AND COALESCE(deferred, 0) > 0`
+	args := []any{time.Now().UnixMilli()}
+	if sourceKey != "" {
+		q += ` AND source = ?`
+		args = append(args, sourceKey)
+	}
+	res, err := s.db.Exec(q, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // BumpJobAttempt 把任务放回 pending 并累加执行次数，用于自动重试。
 // 返回受影响行数；0 表示任务状态已改变（例如被取消），调用方应放弃重试。
 func (s *Store) BumpJobAttempt(id int64, lastErr string) (int64, error) {
